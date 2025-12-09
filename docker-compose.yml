@@ -1,0 +1,13 @@
+services:
+  client_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "client.py"]
+    volumes:
+      - .:/app
+    working_dir: /app
+    ports:
+      - "8081:8081"
+    environment:
+      - SELENIUM_URL=http://host.docker.internal:4444
