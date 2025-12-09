@@ -32,7 +32,7 @@ async def create_driver(_run_test_id='1'):
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=True)
     context = await browser.new_context(
-        viewport={'width': 1280, 'height': 800}
+        viewport={'width': 800, 'height': 800}
     )
     page = await context.new_page()
     import logging
@@ -66,8 +66,7 @@ async def maximize_window(_run_test_id='1'):
     Playwright does not support maximizing window directly, but you can set viewport size.
     """
     global driver
-    context = driver[_run_test_id]['context']
-    await context.set_viewport_size({"width": 1920, "height": 1080})
+    await driver[_run_test_id]['page'].set_viewport_size({"width": 1280, "height": 800})
     return "success maximizing"
 
 async def add_cookie(name, value, _run_test_id='1', use_vars='false'):
