@@ -11,7 +11,7 @@ from streaming import get_latest_frame
 load_dotenv()
 
 async def start_streaming_loop():
-    backend_uri = 'wss://stg-lalama.tdlbox.com/ws/' + os.getenv("BACKEND_WS_URI", "default_client_id")
+    backend_uri = 'wss://beta.barkoagent.com/ws/' + os.getenv("BACKEND_WS_URI", "default_client_id")
     run_id = "1"
     while True:
         await stream_latest_frames(

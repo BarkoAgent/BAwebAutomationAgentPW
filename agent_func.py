@@ -43,7 +43,7 @@ async def create_driver(_run_test_id='1'):
     time_after = time.time()
     logging.info(f"screenshot taken screenshot_{_run_test_id}_{time_now}.png in {time_after - time_now:.2f}s")
     driver[_run_test_id] = {'playwright': playwright, 'browser': browser, 'context': context, 'page': page}
-    main_url = os.getenv("MAIN_URL", "https://stg-lalama.tdlbox.com")
+    main_url = os.getenv("MAIN_URL", "https://beta.barkoagent.com")
     await streaming.start_stream(driver[_run_test_id], run_id="1", fps=1.0, jpeg_quality=70)
     await page.goto(main_url)
     return "driver created"
