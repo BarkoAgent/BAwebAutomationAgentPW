@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import sys
+import subprocess
 from dotenv import load_dotenv
 
 from websocket_handler import main_connect_ws, stream_latest_frames
@@ -38,8 +39,9 @@ if __name__ == "__main__":
             logging.error("No BACKEND_WS_URI provided, exiting.")
             sys.exit(1)
         os.environ["BACKEND_WS_URI"] = backend_uri
-
-    try:
+    logging.info("Installing Playwright browsers...")
+    os.system("python -m playwright install")
+    try: 
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Client stopped manually.")
