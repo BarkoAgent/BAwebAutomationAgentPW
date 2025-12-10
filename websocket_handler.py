@@ -8,6 +8,10 @@ import agent_func
 import inspect
 import struct
 import hashlib
+import certifi
+
+os.environ.setdefault('SSL_CERT_FILE', certifi.where())
+os.environ.setdefault('REQUESTS_CA_BUNDLE', certifi.where())
 
 from typing import Callable, Optional, Any, Awaitable
 from dotenv import load_dotenv

@@ -3,8 +3,11 @@ import asyncio
 import logging
 import os
 import sys
-import subprocess
 from dotenv import load_dotenv
+import certifi
+
+os.environ.setdefault('SSL_CERT_FILE', certifi.where())
+os.environ.setdefault('REQUESTS_CA_BUNDLE', certifi.where())
 
 from websocket_handler import main_connect_ws, stream_latest_frames
 from streaming import get_latest_frame
