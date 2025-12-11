@@ -95,6 +95,16 @@ async def navigate_to_url(url: str, _run_test_id='1', use_vars='false') -> str:
 
 async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 'false') -> str:
     """
+    Playwright supports multiple locator strategies. Here are some common examples:
+    CSS Selectors: The most common and powerful method for locating elements based on their HTML structure, classes, IDs, or attributes.
+    'css=#my-id.my-class > button:visible'
+    // Shorthand (prefix is optional for CSS):
+    '.my-class'
+    XPath Selectors: Used for targeting elements based on their hierarchical position, especially when unique attributes are missing.
+    'xpath=//button[contains(text(), "Click me")]'
+    ID Selectors: Directly target elements by their ID attribute.
+    'id=my-unique-id'
+
     Types `value` into element specified by locator.
     """
     global driver, test_variables
@@ -147,6 +157,16 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
 async def click(locator: str, _run_test_id='1') -> str:
     """
     Clicks in the element defined by its locator.
+    
+    Playwright supports multiple locator strategies. Here are some common examples:
+    CSS Selectors: The most common and powerful method for locating elements based on their HTML structure, classes, IDs, or attributes.
+    'css=#my-id.my-class > button:visible'
+    // Shorthand (prefix is optional for CSS):
+    '.my-class'
+    XPath Selectors: Used for targeting elements based on their hierarchical position, especially when unique attributes are missing.
+    'xpath=//button[contains(text(), "Click me")]'
+    ID Selectors: Directly target elements by their ID attribute.
+    'id=my-unique-id'
     """
     global driver
     page = driver[_run_test_id]['page']
@@ -176,7 +196,7 @@ async def right_click(locator: str, _run_test_id='1') -> str:
 
 async def get_page_html(_run_test_id='1') -> str:
     """
-    Returns cleaned page HTML.
+    Returns cleaned page HTML. Recommended to use before doing any actions on the page to confirm the existance of elements.
     """
     global driver
     page = driver[_run_test_id]['page']
