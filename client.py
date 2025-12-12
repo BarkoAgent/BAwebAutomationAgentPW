@@ -43,8 +43,15 @@ if __name__ == "__main__":
             sys.exit(1)
         os.environ["BACKEND_WS_URI"] = backend_uri
     logging.info("Installing Playwright browsers...")
-    os.system("python -m playwright install")
-    os.system("python -m playwright install-deps")
+
+    # check if venv/bin/python3 exists
+    venv_python = os.path.join(os.path.dirname(sys.executable), 'python3')
+    if os.path.exists(venv_python):
+        os.system(f"{venv_python} -m playwright install")
+        os.system(f"{venv_python} -m playwright install-deps")
+    else:
+        os.system("playwright install")
+        os.system("playwright install-deps")
     try: 
         asyncio.run(main())
     except KeyboardInterrupt:
