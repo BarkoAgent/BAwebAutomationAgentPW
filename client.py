@@ -44,6 +44,7 @@ if __name__ == "__main__":
         os.environ["BACKEND_WS_URI"] = backend_uri
     logging.info("Installing Playwright browsers...")
     os.system("python -m playwright install")
+    os.system("python -m playwright install-deps")
     try: 
         asyncio.run(main())
     except KeyboardInterrupt:
