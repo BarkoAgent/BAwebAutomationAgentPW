@@ -54,7 +54,7 @@ def _make_envelope(header: dict, payload_bytes: bytes) -> bytes:
 async def stream_latest_frames(
     ws_uri: str,
     run_id: str,
-    get_latest_frame: Callable[[str], Optional[bytes] | Awaitable[Optional[bytes]]],
+    get_latest_frame,
     interval: float = 0.5,
     send_start_end_control: bool = True,
     retry_connect_delay: float = 5.0,
