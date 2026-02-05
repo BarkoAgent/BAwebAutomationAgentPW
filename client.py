@@ -41,8 +41,8 @@ async def main():
 
     venv_python = os.path.join(os.path.dirname(sys.executable), 'python3')
     if os.path.exists(venv_python):
-        os.system(f"{venv_python} -m playwright install")
-        os.system(f"{venv_python} -m playwright install-deps")
+        os.system(f'"{venv_python}" -m playwright install')
+        os.system(f'"{venv_python}" -m playwright install-deps')
     else:
         os.system("playwright install")
         os.system("playwright install-deps")
