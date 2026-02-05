@@ -39,6 +39,14 @@ async def main():
     else:
         logging.info("Streaming is disabled.")
 
+    venv_python = os.path.join(os.path.dirname(sys.executable), 'python3')
+    if os.path.exists(venv_python):
+        os.system(f"{venv_python} -m playwright install")
+        os.system(f"{venv_python} -m playwright install-deps")
+    else:
+        os.system("playwright install")
+        os.system("playwright install-deps")
+
     try:
         await main_connect_ws(agent_func)
     except Exception as e:
