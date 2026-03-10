@@ -35,16 +35,9 @@ async def create_driver(_run_test_id='1'):
         viewport={'width': 800, 'height': 800}
     )
     page = await context.new_page()
-    import logging
-    import time
-    time_now = time.time()
-    logging.info(f"about to take screenshot screenshot_{_run_test_id}_{time_now}.png")
-    await page.screenshot()
-    time_after = time.time()
-    logging.info(f"screenshot taken screenshot_{_run_test_id}_{time_now}.png in {time_after - time_now:.2f}s")
     driver[_run_test_id] = {'playwright': playwright, 'browser': browser, 'context': context, 'page': page}
     main_url = os.getenv("MAIN_URL", "https://beta.barkoagent.com")
-    await streaming.astart_stream(driver[_run_test_id], run_id="1", fps=1.0, jpeg_quality=70)
+    await streaming.astart_stream(driver[_run_test_id], run_id=_run_test_id, fps=0.5, jpeg_quality=70)
     await page.goto(main_url)
     return "driver created"
 
@@ -57,7 +50,7 @@ async def stop_driver(_run_test_id='1'):
         await driver[_run_test_id]['context'].close()
         await driver[_run_test_id]['browser'].close()
         await driver[_run_test_id]['playwright'].stop()
-        streaming.astop_stream(_run_test_id)
+        streaming.stop_stream(_run_test_id)
         return "success"
     return "no driver"
 
