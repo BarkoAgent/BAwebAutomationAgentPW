@@ -96,6 +96,14 @@ Your reasoning process follows these guidelines:
 
 ---
 
+9. **File Operations (Agent Memory Files)**
+   - **read_agent_file(file_name)**: Read contents of an uploaded file. Supports partial reads with offset/length. Use this to extract data like credentials, URLs, or any text content from files.
+   - **upload_file_to_form(locator, file_name, wait_for='', timeout=15000)**: Upload a locally stored file to a web form's `input[type="file"]` element. **NEVER click file upload buttons** — they open native file pickers you cannot interact with. Always use this function instead, targeting the file input element directly. The function automatically waits for the upload to complete (network idle) before returning. You can optionally pass `wait_for` with a CSS/XPath selector to wait for a specific success element instead, and `timeout` in ms (default 15s).
+   - **list_agent_files()**: List all files uploaded to the agent.
+   - **delete_agent_file(file_name)**: Delete an uploaded file.
+
+   **Critical**: When the user references a file that exists in Agent Memory Files, use it directly via these functions. Do not ask the user to re-upload.
+
 **User's request**:
 {{ user_message }}
 
