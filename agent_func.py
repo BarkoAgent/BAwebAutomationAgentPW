@@ -1,105 +1,18 @@
 import re
 import os
 import json
+import time
+import asyncio
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
 
 import ba_ws_sdk.streaming as streaming
+import ba_ws_sdk.file_system as file_system
 from playwright.async_api import async_playwright
 
 test_variables = {}
 driver: dict[str, object] = {}
 run_test_id = ""
 
-# ─── Attachments (flat directory: ./attachments/) ────────────────────────────
-ATTACHMENTS_DIR = Path(__file__).resolve().parent / "attachments"
-
-_attachments_cache = None  # list of {name, size_bytes, modified_iso} or None
-
-
-def sanitize_filename(name: str) -> str:
-    """
-    Strip dangerous characters and path components from a filename.
-    Returns a safe filename or raises ValueError if result is empty.
-    """
-    name = name.replace("..", "").replace("/", "").replace("\\", "")
-    name = re.sub(r"[^a-zA-Z0-9\-_. ]", "", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    if len(name) > 255:
-        name = name[:255]
-    name = name.lstrip(".")
-    if not name:
-        raise ValueError("Filename is empty after sanitization")
-    return name
-
-
-def _scan_attachments() -> list[dict]:
-    """Scan ./attachments/ and return file metadata."""
-    if not ATTACHMENTS_DIR.is_dir():
-        return []
-    files = []
-    for entry in sorted(ATTACHMENTS_DIR.iterdir()):
-        if entry.is_file() and not entry.name.startswith(".tmp_"):
-            stat = entry.stat()
-            files.append({
-                "name": entry.name,
-                "size_bytes": stat.st_size,
-                "modified_iso": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            })
-    return files
-
-
-def _invalidate_cache():
-    """Remove cached metadata so next list call rescans."""
-    global _attachments_cache
-    _attachments_cache = None
-
-
-def _get_attachments_metadata() -> list[dict]:
-    """Get cached metadata or scan disk."""
-    global _attachments_cache
-    if _attachments_cache is None:
-        _attachments_cache = _scan_attachments()
-    return _attachments_cache
-
-
-def _migrate_attachments_flat():
-    """One-time migration: move files from ./attachments/{subdir}/ to ./attachments/ flat."""
-    if not ATTACHMENTS_DIR.is_dir():
-        return
-    for entry in list(ATTACHMENTS_DIR.iterdir()):
-        if entry.is_dir() and not entry.name.startswith("."):
-            for f in entry.iterdir():
-                if f.is_file():
-                    dest = ATTACHMENTS_DIR / f.name
-                    if not dest.exists():
-                        f.rename(dest)
-                        logging.info(f"[Migration] Moved {f} -> {dest}")
-                    else:
-                        logging.warning(f"[Migration] Skipped {f} (already exists at {dest})")
-            # Remove empty subdir
-            try:
-                entry.rmdir()
-            except OSError:
-                pass
-
-# Run migration on import
-_migrate_attachments_flat()
-
-
-def save_uploaded_file(file_name: str, file_bytes: bytes):
-    """
-    Save raw file bytes to ./attachments/{file_name}.
-    Called by the WS binary envelope handler (not an agent function).
-    """
-    safe_name = sanitize_filename(file_name)
-    ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = ATTACHMENTS_DIR / safe_name
-    dest.write_bytes(file_bytes)
-    _invalidate_cache()
-    logging.info(f"[AgentFiles] Saved {len(file_bytes)} bytes -> {dest}")
-    return safe_name
 
 def clean_html(html_content):
     for tag in ['script', 'style', 'svg']:
@@ -126,9 +39,55 @@ async def create_driver(_run_test_id='1'):
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=True)
     context = await browser.new_context(
-        viewport={'width': 800, 'height': 800}
+        viewport={'width': 800, 'height': 800},
+        accept_downloads=True,
     )
     page = await context.new_page()
+
+    # ── Download handler ─────────────────────────────────────────────────
+    # Capture run_id in closure so the callback knows which run it belongs to.
+    captured_run_id = _run_test_id
+
+    async def _handle_download(download):
+        """Automatically save browser-initiated downloads to the agent file system."""
+        suggested = download.suggested_filename
+        try:
+            safe_name = file_system.sanitize_filename(suggested)
+        except ValueError:
+            safe_name = f"download_{int(time.time())}"
+
+        file_system.on_download_started(captured_run_id, safe_name)
+
+        try:
+            # Wait for Playwright to finish downloading to its temp location
+            path = await download.path()
+            if path is None:
+                file_system.on_download_failed(
+                    captured_run_id, safe_name,
+                    "Download was cancelled or browser context closed",
+                )
+                return
+
+            # Save to attachments directory
+            dest = file_system.get_attachments_dir() / safe_name
+            os.makedirs(str(file_system.get_attachments_dir()), exist_ok=True)
+            await download.save_as(str(dest))
+
+            file_system.on_download_complete(captured_run_id, safe_name, str(dest))
+        except Exception as e:
+            logging.error(f"[Download] Error handling download {safe_name}: {e}")
+            file_system.on_download_failed(captured_run_id, safe_name, str(e))
+
+    def _attach_download_handler(target_page):
+        """Register the download handler on a page."""
+        target_page.on("download", lambda dl: asyncio.ensure_future(_handle_download(dl)))
+
+    _attach_download_handler(page)
+
+    # Also register on any new pages the context opens (popups, new tabs)
+    context.on("page", lambda new_page: _attach_download_handler(new_page))
+    # ─────────────────────────────────────────────────────────────────────
+
     driver[_run_test_id] = {'playwright': playwright, 'browser': browser, 'context': context, 'page': page}
 
     main_url = os.getenv("MAIN_URL", "https://beta.barkoagent.com")
@@ -146,6 +105,7 @@ async def stop_driver(_run_test_id='1'):
         await driver[_run_test_id]['browser'].close()
         await driver[_run_test_id]['playwright'].stop()
         streaming.stop_stream(_run_test_id)
+        file_system.clear_downloads(_run_test_id)
         return "success"
     return "no driver"
 
@@ -361,95 +321,7 @@ async def refresh_page(_run_test_id='1') -> str:
     return "page refreshed"
 
 
-# ─── File Management Functions ──────────────────────────────────────────────
-
-MAX_READ_BYTES = 1 * 1024 * 1024  # 1MB max per read
-DEFAULT_READ_BYTES = 64 * 1024     # 64KB default
-
-
-async def list_agent_files(_run_test_id='1') -> str:
-    """
-    Returns a JSON array of files uploaded to the agent.
-    Each entry has: name, size_bytes, modified_iso.
-    """
-    files = _get_attachments_metadata()
-    return json.dumps(files)
-
-
-async def delete_agent_file(file_name: str, _run_test_id='1') -> str:
-    """
-    Deletes an uploaded file by name.
-    """
-    try:
-        safe_name = sanitize_filename(file_name)
-    except ValueError as e:
-        return json.dumps({"status": "error", "error": str(e)})
-
-    target = ATTACHMENTS_DIR / safe_name
-    if not target.is_file():
-        return json.dumps({"status": "error", "error": "file not found"})
-
-    target.unlink()
-    _invalidate_cache()
-    return json.dumps({"status": "success", "deleted": safe_name})
-
-
-async def read_agent_file(
-    file_name: str,
-    offset: str = '0',
-    length: str = '',
-    as_text: str = 'true',
-    _run_test_id='1',
-) -> str:
-    """
-    Reads an uploaded file by name. Supports partial reads via offset/length.
-    Defaults to first 64KB if length is not specified. Max single read is 1MB.
-
-    Args:
-        file_name: name of the file to read
-        offset: byte offset to start reading from (default 0)
-        length: number of bytes to read (default 64KB, max 1MB)
-        as_text: 'true' to decode as UTF-8, 'false' to return base64
-    """
-    try:
-        safe_name = sanitize_filename(file_name)
-    except ValueError as e:
-        return json.dumps({"status": "error", "error": str(e)})
-
-    target = ATTACHMENTS_DIR / safe_name
-    if not target.is_file():
-        return json.dumps({"status": "error", "error": "file not found"})
-
-    total_size = target.stat().st_size
-    byte_offset = int(offset)
-    byte_length = int(length) if length else DEFAULT_READ_BYTES
-    byte_length = min(byte_length, MAX_READ_BYTES)
-    byte_offset = max(0, min(byte_offset, total_size))
-
-    with open(target, "rb") as f:
-        f.seek(byte_offset)
-        data = f.read(byte_length)
-
-    truncated = (byte_offset + len(data)) < total_size
-
-    if as_text.lower() == 'true':
-        try:
-            content = data.decode("utf-8")
-        except UnicodeDecodeError:
-            import base64
-            content = base64.b64encode(data).decode("ascii")
-    else:
-        import base64
-        content = base64.b64encode(data).decode("ascii")
-
-    return json.dumps({
-        "content": content,
-        "total_size": total_size,
-        "offset": byte_offset,
-        "length": len(data),
-        "truncated": truncated,
-    })
-
+# ─── File Upload to Web Form (browser-specific) ─────────────────────────────
 
 async def upload_file_to_form(locator: str, file_name: str, wait_for: str = '', timeout: int = 15000, _run_test_id='1') -> str:
     """
@@ -470,13 +342,14 @@ async def upload_file_to_form(locator: str, file_name: str, wait_for: str = '', 
         timeout = 15000
 
     try:
-        safe_name = sanitize_filename(file_name)
+        safe_name = file_system.sanitize_filename(file_name)
     except ValueError as e:
         return f"error: {e}"
 
-    file_path = (ATTACHMENTS_DIR / safe_name).resolve()
+    attachments_dir = file_system.get_attachments_dir()
+    file_path = (attachments_dir / safe_name).resolve()
     if not file_path.is_file():
-        avail = [f.name for f in ATTACHMENTS_DIR.resolve().iterdir() if f.is_file()] if ATTACHMENTS_DIR.exists() else []
+        avail = [f.name for f in attachments_dir.resolve().iterdir() if f.is_file()] if attachments_dir.exists() else []
         return f"error: file '{safe_name}' not found at {file_path}. Available files: {avail}"
 
     global driver
