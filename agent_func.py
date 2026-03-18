@@ -321,6 +321,75 @@ async def refresh_page(_run_test_id='1') -> str:
     return "page refreshed"
 
 
+async def wait_for_download(timeout: str = '30', _run_test_id='1') -> str:
+    """
+    Waits for a browser file download to complete. Call this AFTER clicking
+    a download button or link. Returns the downloaded file name and size.
+
+    Args:
+        timeout: Maximum seconds to wait for the download to complete (default 30).
+    """
+    try:
+        timeout_secs = float(timeout)
+    except (TypeError, ValueError):
+        timeout_secs = 30.0
+
+    def _find_entry():
+        """Check for a completed, failed, or pending download (most recent first)."""
+        with file_system._download_lock:
+            entries = file_system._pending_downloads.get(_run_test_id, [])
+            for e in reversed(entries):
+                if e["status"] == "complete":
+                    return "complete", e
+                if e["status"] == "failed":
+                    return "failed", e
+            for e in reversed(entries):
+                if e["status"] == "pending":
+                    return "pending", e
+        return None, None
+
+    # Check if a download already completed (fast path)
+    status, entry = _find_entry()
+    if status == "complete":
+        return json.dumps({"status": "success", "file_name": entry["file_name"], "size_bytes": entry["size_bytes"]})
+    if status == "failed":
+        return json.dumps({"status": "error", "error": f"Download failed: {entry['error']}", "file_name": entry["file_name"]})
+
+    # If no download event yet, wait briefly for it to fire
+    # (small race between click() returning and the download event arriving)
+    if status is None:
+        await asyncio.sleep(0.5)
+        status, entry = _find_entry()
+
+    if status == "complete":
+        return json.dumps({"status": "success", "file_name": entry["file_name"], "size_bytes": entry["size_bytes"]})
+    if status == "failed":
+        return json.dumps({"status": "error", "error": f"Download failed: {entry['error']}", "file_name": entry["file_name"]})
+    if entry is None:
+        return json.dumps({"status": "error", "error": "No download detected. Make sure you clicked a download link or button before calling wait_for_download."})
+
+    # Attach an asyncio.Event so the completion handler can signal us
+    event = asyncio.Event()
+    with file_system._download_lock:
+        entry["event"] = event
+
+    # Double-check: status may have changed between our check and attaching the event
+    if entry["status"] == "complete":
+        return json.dumps({"status": "success", "file_name": entry["file_name"], "size_bytes": entry["size_bytes"]})
+    if entry["status"] == "failed":
+        return json.dumps({"status": "error", "error": f"Download failed: {entry['error']}", "file_name": entry["file_name"]})
+
+    # Wait for the download to finish or timeout
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout_secs)
+    except asyncio.TimeoutError:
+        return json.dumps({"status": "error", "error": f"Download timed out after {timeout_secs}s. The file may still be downloading.", "file_name": entry["file_name"]})
+
+    if entry["status"] == "complete":
+        return json.dumps({"status": "success", "file_name": entry["file_name"], "size_bytes": entry["size_bytes"]})
+    return json.dumps({"status": "error", "error": f"Download failed: {entry.get('error', 'unknown')}", "file_name": entry["file_name"]})
+
+
 # ─── File Upload to Web Form (browser-specific) ─────────────────────────────
 
 async def upload_file_to_form(locator: str, file_name: str, wait_for: str = '', timeout: int = 15000, _run_test_id='1') -> str:
