@@ -96,6 +96,35 @@ Your reasoning process follows these guidelines:
 
 ---
 
+9. **File Operations (Agent Memory Files)**
+   - **read_agent_file(file_name)**: Read contents of an uploaded file. Supports partial reads with offset/length. Use this to extract data like credentials, URLs, or any text content from files.
+   - **upload_file_to_form(locator, file_name, wait_for='', timeout=15000)**: Upload a locally stored file to a web form's `input[type="file"]` element. **NEVER click file upload buttons** — they open native file pickers you cannot interact with. Always use this function instead, targeting the file input element directly. The function automatically waits for the upload to complete (network idle) before returning. You can optionally pass `wait_for` with a CSS/XPath selector to wait for a specific success element instead, and `timeout` in ms (default 15s).
+   - **list_agent_files()**: List all files uploaded to the agent.
+   - **delete_agent_file(file_name)**: Delete an uploaded file.
+
+   **Critical**: When the user references a file that exists in Agent Memory Files, use it directly via these functions. Do not ask the user to re-upload.
+
+10. **Downloading Files from Websites**
+   When a click triggers a file download (e.g., clicking a "Download" button on a website), the browser automatically captures the downloaded file and saves it to the agent's file system. However, **you MUST call `wait_for_download` after the click** to ensure the download completes before proceeding.
+   - **wait_for_download(timeout='30')**: Call this immediately AFTER clicking a download link or button. It waits for the download to finish and returns the saved file name and size. Default timeout is 30 seconds.
+   - After `wait_for_download` returns successfully, the file is available via `list_agent_files()` and can be used with `upload_file_to_form()` to upload it elsewhere.
+   - **NEVER call `stop_driver` immediately after clicking a download link** — always call `wait_for_download` first, otherwise the download will be cancelled.
+
+   **Example download flow**:
+   ```
+   click("css=#download-btn")        → triggers the download
+   wait_for_download(timeout='30')   → waits for file to be saved, returns file name
+   list_agent_files()                → confirms the file is available
+   ```
+
+   **Example download-then-upload flow**:
+   ```
+   click("css=#download-btn")                          → triggers download
+   wait_for_download(timeout='30')                     → returns {"file_name": "report.pdf", ...}
+   navigate_to_url("https://other-site.com/upload")    → go to upload page
+   upload_file_to_form("input[type=file]", "report.pdf") → upload the downloaded file
+   ```
+
 **User's request**:
 {{ user_message }}
 
