@@ -21,14 +21,21 @@ def clean_html(html_content):
 
 async def stop_all_drivers():
     global driver
-    for run_id, context in list(driver.items()):
+    for run_id, d in list(driver.items()):
         try:
-            await context.close()
-            print(f"✅ Driver '{run_id}' stopped.")
+            streaming.stop_stream(run_id)
         except Exception as e:
-            print(f"⚠️ Error stopping driver '{run_id}': {e}")
+            logging.warning(f"Error stopping stream for '{run_id}': {e}")
+        for resource, method in [('context', 'close'), ('browser', 'close'), ('playwright', 'stop')]:
+            obj = d.get(resource)
+            if obj:
+                try:
+                    await getattr(obj, method)()
+                except Exception as e:
+                    logging.warning(f"Error closing {resource} for driver '{run_id}': {e}")
+        logging.info(f"Driver '{run_id}' stopped.")
     driver.clear()
-    print("🗑️ All drivers stopped and entries cleared.")
+    logging.info("All drivers stopped and cleared.")
 
 async def create_driver(_run_test_id='1'):
     """
@@ -156,9 +163,10 @@ async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 
     Types `value` into element specified by locator.
     """
     global driver, test_variables
-    page = driver[_run_test_id]['page']
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     if use_vars == 'true' and _run_test_id in test_variables:
         value = test_variables[_run_test_id].get(value, value)
+    await page.wait_for_selector(locator, state="visible", timeout=10000)
     await page.fill(locator, value)
     return "sent keys"
 
@@ -167,8 +175,8 @@ async def exists(locator: str, _run_test_id='1') -> str:
     Waits until element is visible (exists).
     """
     global driver
-    page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=10000)
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    await page.wait_for_selector(locator, state="visible", timeout=10000)
     return "exists"
 
 async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false') -> str:
@@ -197,15 +205,15 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
     Scrolls until the element is visible in the viewport.
     """
     global driver
-    page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=1000)
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    await page.wait_for_selector(locator, timeout=10000)
     await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
     return "scrolled"
 
 async def click(locator: str, _run_test_id='1') -> str:
     """
     Clicks in the element defined by its locator.
-    
+
     Playwright supports multiple locator strategies. Here are some common examples:
     CSS Selectors: The most common and powerful method for locating elements based on their HTML structure, classes, IDs, or attributes.
     'css=#my-id.my-class > button:visible'
@@ -217,8 +225,8 @@ async def click(locator: str, _run_test_id='1') -> str:
     'id=my-unique-id'
     """
     global driver
-    page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=1000)
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    await page.wait_for_selector(locator, state="visible", timeout=10000)
     await page.click(locator)
     return "clicked successfully on the element"
 
@@ -227,8 +235,8 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     Double clicks on element.
     """
     global driver
-    page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=1000)
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    await page.wait_for_selector(locator, state="visible", timeout=10000)
     await page.dblclick(locator)
     return "double clicked"
 
@@ -237,10 +245,32 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     Right clicks on element.
     """
     global driver
-    page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=1000)
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    await page.wait_for_selector(locator, state="visible", timeout=10000)
     await page.click(locator, button='right')
     return "right clicked"
+
+async def select_native_dropdown(locator: str, option: str, by: str = "label", _run_test_id='1') -> str:
+    """
+    Selects an option from a native <select> element.
+
+    Args:
+        locator: CSS/XPath selector for the <select> element.
+        option: The value to select.
+        by: How to match the option — "label" (visible text, default), "value" (option value attr), or "index" (0-based integer).
+    """
+    global driver
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    await page.wait_for_selector(locator, state="visible", timeout=10000)
+
+    if by == "value":
+        await page.select_option(locator, value=option)
+    elif by == "index":
+        await page.select_option(locator, index=int(option))
+    else:
+        await page.select_option(locator, label=option)
+
+    return "selected"
 
 async def get_page_html(_run_test_id='1') -> str:
     """
