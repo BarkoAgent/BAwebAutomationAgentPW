@@ -176,7 +176,7 @@ async def exists(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
+    await page.wait_for_selector(locator, state="visible", timeout=15000)
     return "exists"
 
 async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false') -> str:
@@ -188,7 +188,7 @@ async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false')
     if use_vars == 'true' and _run_test_id in test_variables:
         text = test_variables[_run_test_id].get(text, text)
     locator = f"text={text}"
-    await page.wait_for_selector(locator, timeout=10000)
+    await page.wait_for_selector(locator, timeout=15000)
     return "exists (text)"
 
 async def does_not_exist(locator: str, _run_test_id='1') -> str:
@@ -197,7 +197,7 @@ async def does_not_exist(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state='detached', timeout=10000)
+    await page.wait_for_selector(locator, state='detached', timeout=15000)
     return "doesn't exists"
 
 async def scroll_to_element(locator: str, _run_test_id='1') -> str:
@@ -206,7 +206,7 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=10000)
+    await page.wait_for_selector(locator, timeout=150000)
     await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
     return "scrolled"
 
@@ -226,7 +226,7 @@ async def click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
+    await page.wait_for_selector(locator, state="visible", timeout=150000)
     await page.click(locator)
     return "clicked successfully on the element"
 
@@ -236,7 +236,7 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
+    await page.wait_for_selector(locator, state="visible", timeout=150000)
     await page.dblclick(locator)
     return "double clicked"
 
@@ -246,7 +246,7 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
+    await page.wait_for_selector(locator, state="visible", timeout=150000)
     await page.click(locator, button='right')
     return "right clicked"
 
@@ -278,7 +278,12 @@ async def get_page_html(_run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id]['page']
-    content = await page.content()
+    try:
+        await page.wait_for_load_state('domcontentloaded', timeout=20000)
+        content = await page.content()
+    except Exception:
+        await page.wait_for_load_state('load', timeout=30000)
+        content = await page.content()
     html_content = clean_html(content)
     return html_content
 
