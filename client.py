@@ -51,6 +51,9 @@ async def main():
         await main_connect_ws(agent_func)
     except Exception as e:
         logging.exception(f"Agent encountered an error: {e}")
+    finally:
+        logging.info("Closing drivers...")
+        await agent_func.stop_all_drivers()
 
 if __name__ == "__main__":
     try:
