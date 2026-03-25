@@ -222,7 +222,7 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, timeout=150000)
+        await page.wait_for_selector(locator, timeout=15000)
         await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -245,7 +245,7 @@ async def click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        await page.wait_for_selector(locator, state="visible", timeout=15000)
         await page.click(locator)
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -258,7 +258,7 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        await page.wait_for_selector(locator, state="visible", timeout=15000)
         await page.dblclick(locator)
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -271,7 +271,7 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        await page.wait_for_selector(locator, state="visible", timeout=15000)
         await page.click(locator, button='right')
     except Exception as e:
         return {"status": "error", "error": str(e)}
