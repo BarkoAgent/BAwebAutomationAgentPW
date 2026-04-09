@@ -15,8 +15,8 @@ TARGET_SIZE_SCRIPT = """
 () => {
   function cssPath(el) {
     if (!el || el.nodeType !== 1) return '';
-    if (el.id) return '#' + el.id;
-    const classes = Array.from(el.classList || []).slice(0, 3).join('.');
+    if (el.id) return '#' + CSS.escape(el.id);
+    const classes = Array.from(el.classList || []).slice(0, 3).map(c => CSS.escape(c)).join('.');
     return el.tagName.toLowerCase() + (classes ? '.' + classes : '');
   }
 
@@ -50,14 +50,18 @@ TARGET_SIZE_SCRIPT = """
     const w = rect.width;
     const h = rect.height;
 
-    // Check if either dimension meets the 24px threshold
-    if (w >= MIN || h >= MIN) {
+    // Check if both dimensions meet the 24px threshold (WCAG 2.5.8 requires both ≥ 24px)
+    if (w >= MIN && h >= MIN) {
       passing.push({ locator: cssPath(el), width: Math.round(w), height: Math.round(h), text: (el.innerText || el.textContent || '').trim().slice(0, 80) });
       continue;
     }
 
-    // Both dimensions < 24px — check spacing offset from nearest sibling targets
-    // Simple approach: check margins/padding that create spacing
+    // Both dimensions < 24px — check spacing offset from nearest sibling targets.
+    // NOTE: This uses the element's own margins as a proxy for spacing offset. WCAG 2.5.8
+    // requires measuring actual distance to adjacent interactive targets, not own margins.
+    // An element with large margins may still overlap neighbors with negative margins or
+    // absolute positioning. This is a simplified heuristic; manual review is needed for
+    // elements near boundaries.
     const marginTop = parseFloat(style.marginTop) || 0;
     const marginBottom = parseFloat(style.marginBottom) || 0;
     const marginLeft = parseFloat(style.marginLeft) || 0;
@@ -70,21 +74,22 @@ TARGET_SIZE_SCRIPT = """
     const meetsSpacingOffset = effectiveW >= MIN && effectiveH >= MIN;
 
     if (!meetsSpacingOffset) {
-      failing.push({
-        locator: cssPath(el),
-        text: (el.innerText || el.textContent || '').trim().slice(0, 80),
-        width: Math.round(w),
-        height: Math.round(h),
-        effectiveWidth: Math.round(effectiveW),
-        effectiveHeight: Math.round(effectiveH),
-        tag: el.tagName.toLowerCase(),
-        type: el.getAttribute('type') || '',
-        role: el.getAttribute('role') || '',
-      });
+      if (failing.length < 20) {
+        failing.push({
+          locator: cssPath(el),
+          text: (el.innerText || el.textContent || '').trim().slice(0, 80),
+          width: Math.round(w),
+          height: Math.round(h),
+          effectiveWidth: Math.round(effectiveW),
+          effectiveHeight: Math.round(effectiveH),
+          tag: el.tagName.toLowerCase(),
+          type: el.getAttribute('type') || '',
+          role: el.getAttribute('role') || '',
+        });
+      }
     } else {
       passing.push({ locator: cssPath(el), width: Math.round(w), height: Math.round(h), text: (el.innerText || el.textContent || '').trim().slice(0, 80) });
     }
-    if (failing.length >= 20) break;
   }
 
   return { failing, passing_count: passing.length, total: elements.length };

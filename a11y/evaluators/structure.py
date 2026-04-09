@@ -9,8 +9,8 @@ STRUCTURE_AUDIT_SCRIPT = """
 () => {
   function cssPath(el) {
     if (!el || el.nodeType !== 1) return '';
-    if (el.id) return '#' + el.id;
-    const classes = Array.from(el.classList || []).slice(0, 3).join('.');
+    if (el.id) return '#' + CSS.escape(el.id);
+    const classes = Array.from(el.classList || []).slice(0, 3).map(c => CSS.escape(c)).join('.');
     return el.tagName.toLowerCase() + (classes ? '.' + classes : '');
   }
 

@@ -15,8 +15,8 @@ FOCUS_APPEARANCE_SCRIPT = """
 () => {
   function cssPath(el) {
     if (!el || el.nodeType !== 1) return '';
-    if (el.id) return '#' + el.id;
-    const classes = Array.from(el.classList || []).slice(0, 3).join('.');
+    if (el.id) return '#' + CSS.escape(el.id);
+    const classes = Array.from(el.classList || []).slice(0, 3).map(c => CSS.escape(c)).join('.');
     return el.tagName.toLowerCase() + (classes ? '.' + classes : '');
   }
 
@@ -63,18 +63,28 @@ FOCUS_APPEARANCE_SCRIPT = """
   const outerPerimeter = perimeter + 8 * outlineWidth;
   const focusArea = outlineWidth > 0 ? outerPerimeter * outlineWidth : 0;
 
-  // Also check box-shadow as a focus indicator
+  // Also check box-shadow as a focus indicator.
+  // Strip the optional "inset" keyword, then collect all px values — use spread (4th) if
+  // present, otherwise blur (3rd), so patterns like "0 0 0 3px", "inset 0 0 5px", and
+  // "0 5px 10px" are all handled.
   let boxShadowWidth = 0;
   if (style.boxShadow && style.boxShadow !== 'none') {
-    const bsMatch = style.boxShadow.match(/(\\d+(?:\\.\\d+)?)px\\s+(\\d+(?:\\.\\d+)?)px\\s+(\\d+(?:\\.\\d+)?)px\\s+(\\d+(?:\\.\\d+)?)px/);
-    if (bsMatch) boxShadowWidth = parseFloat(bsMatch[4]) || parseFloat(bsMatch[3]) || 0;
+    const bsTokens = style.boxShadow.replace(/\\binset\\b/gi, '').match(/(\\d+(?:\\.\\d+)?)px/g);
+    if (bsTokens && bsTokens.length >= 1) {
+      const vals = bsTokens.map(t => parseFloat(t));
+      boxShadowWidth = vals.length >= 4 ? (vals[3] || vals[2] || 0) : (vals[vals.length - 1] || 0);
+    }
   }
 
   // Effective indicator width: use whichever is bigger
   const effectiveWidth = Math.max(outlineWidth, boxShadowWidth);
   const effectiveArea = effectiveWidth > 0 ? outerPerimeter * effectiveWidth : 0;
 
-  // Contrast: outline color vs background color
+  // Contrast: outline color vs element background color.
+  // NOTE: WCAG 2.4.13 requires contrast against "adjacent non-focus-indicator colors".
+  // Using the element's own backgroundColor is incorrect when the element is transparent
+  // or the indicator extends beyond the element bounds. This is a known limitation —
+  // elements with transparent backgrounds should be flagged for manual review.
   const focusContrast = contrastRatio(outlineColor, bgColor);
 
   return {
@@ -92,7 +102,7 @@ FOCUS_APPEARANCE_SCRIPT = """
     meetsContrastThreshold: focusContrast !== null && focusContrast >= 3.0,
     outlineColor: style.outlineColor,
     backgroundColor: style.backgroundColor,
-    rect: { width: rect.width, height: rect.height },
+    rect: { width: rect.width, height: rect.height, top: rect.top, left: rect.left },
   };
 }
 """
@@ -109,9 +119,11 @@ async def run_focus_appearance_evaluator(page: Any) -> List[Dict[str, Any]]:
         if not sample:
             continue
         locator = sample.get("locator", "")
-        if locator in seen:
+        rect = sample.get("rect", {})
+        dedup_key = (locator, rect.get("top"), rect.get("left"))
+        if dedup_key in seen:
             continue
-        seen.add(locator)
+        seen.add(dedup_key)
         samples.append(sample)
 
     if not samples:

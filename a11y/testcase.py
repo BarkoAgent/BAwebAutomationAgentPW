@@ -72,7 +72,7 @@ def _first_present(mapping: Dict[str, Any], keys: List[str], default: Any = None
 
 def _normalize_action(raw_action: str) -> str:
     key = (raw_action or "").strip().lower()
-    return ACTION_ALIASES.get(key, raw_action)
+    return ACTION_ALIASES.get(key, key)
 
 
 def _normalize_step(step: Dict[str, Any], step_index: int) -> Dict[str, Any]:
@@ -93,6 +93,7 @@ def _normalize_step(step: Dict[str, Any], step_index: int) -> Dict[str, Any]:
         normalized_args.setdefault("locator", _first_present(step, ["locator", "selector", "target"]))
         normalized_args.setdefault("value", _first_present(step, ["value", "text", "input"]))
     elif action == "exists_with_text":
+        normalized_args.setdefault("locator", _first_present(step, ["locator", "selector", "target"]))
         normalized_args.setdefault("text", _first_present(step, ["text", "value", "expected_text", "expectedText"]))
     elif action == "select_native_dropdown":
         normalized_args.setdefault("locator", _first_present(step, ["locator", "selector", "target"]))

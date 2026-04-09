@@ -29,7 +29,7 @@ from ._template import HTML_TEMPLATE
 def _fmt_timestamp(iso_str: str) -> str:
     try:
         dt = datetime.fromisoformat(iso_str)
-        return dt.strftime("%-d %b %Y, %H:%M UTC")
+        return "{} {}, {} UTC".format(dt.day, dt.strftime("%b %Y"), dt.strftime("%H:%M"))
     except Exception:
         return iso_str
 
@@ -47,7 +47,7 @@ def _fmt_report_id(report_id: str) -> str:
         time_part = "{}:{}".format(m.group(2), m.group(3))
         try:
             dt = datetime.strptime("{} {}".format(date_part, time_part), "%Y-%m-%d %H:%M")
-            formatted_date = dt.strftime("%-d %b %Y, %H:%M")
+            formatted_date = "{} {}, {}".format(dt.day, dt.strftime("%b %Y"), time_part)
         except Exception:
             formatted_date = "{} {}".format(date_part, time_part)
         return "{} · {}".format(slug, formatted_date) if slug else formatted_date

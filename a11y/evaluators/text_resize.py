@@ -184,7 +184,17 @@ async def run_text_resize_evaluator(page: Any) -> List[Dict[str, Any]]:
     # --- 1.4.4: Resize Text (200% zoom via CSS zoom) ---
     zoom_screenshot_b64: str = ""
     try:
-        await page.evaluate("() => { document.documentElement.style.zoom = '2'; }")
+        await page.evaluate("""
+            () => {
+              const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
+              if (isFirefox) {
+                document.documentElement.style.transform = 'scale(2)';
+                document.documentElement.style.transformOrigin = '0 0';
+              } else {
+                document.documentElement.style.zoom = '2';
+              }
+            }
+        """)
         await asyncio.sleep(0.2)
         zoom_clipped = await page.evaluate(ZOOM_OVERFLOW_SCRIPT)
         try:
@@ -193,7 +203,13 @@ async def run_text_resize_evaluator(page: Any) -> List[Dict[str, Any]]:
             ).decode()
         except Exception:
             pass
-        await page.evaluate("() => { document.documentElement.style.zoom = ''; }")
+        await page.evaluate("""
+            () => {
+              document.documentElement.style.zoom = '';
+              document.documentElement.style.transform = '';
+              document.documentElement.style.transformOrigin = '';
+            }
+        """)
     except Exception:
         zoom_clipped = []
 

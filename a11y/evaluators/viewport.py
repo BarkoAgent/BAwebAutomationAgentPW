@@ -27,25 +27,27 @@ OVERFLOW_SCRIPT = """
 
 
 async def run_viewport_reflow_evaluator(page: Any, viewport_profile: str) -> List[Dict[str, Any]]:
-    if "mobile" not in viewport_profile.lower():
+    if not viewport_profile or "mobile" not in viewport_profile.lower():
         return []
 
     original_viewport = getattr(page, "viewport_size", None) or {"width": 800, "height": 800}
     mobile_viewport = {"width": 375, "height": 812}
 
-    await page.set_viewport_size(mobile_viewport)
-    await asyncio.sleep(0.25)
-    overflow_result = await page.evaluate(OVERFLOW_SCRIPT)
-
     screenshot_b64: str = ""
+    overflow_result: Dict[str, Any] = {}
     try:
-        screenshot_bytes = await page.screenshot(full_page=False, type="jpeg", quality=55)
-        screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
-    except Exception:
-        pass
+        await page.set_viewport_size(mobile_viewport)
+        await asyncio.sleep(0.25)
+        overflow_result = await page.evaluate(OVERFLOW_SCRIPT)
 
-    await page.set_viewport_size(original_viewport)
-    await asyncio.sleep(0.1)
+        try:
+            screenshot_bytes = await page.screenshot(full_page=False, type="jpeg", quality=55)
+            screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
+        except Exception:
+            pass
+    finally:
+        await page.set_viewport_size(original_viewport)
+        await asyncio.sleep(0.1)
 
     overflow = int(overflow_result.get("overflow") or 0)
     offenders = overflow_result.get("offenders") or []

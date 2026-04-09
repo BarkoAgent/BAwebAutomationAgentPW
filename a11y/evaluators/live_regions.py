@@ -10,8 +10,8 @@ LIVE_REGION_SCRIPT = """
 () => {
   function cssPath(el) {
     if (!el || el.nodeType !== 1) return '';
-    if (el.id) return '#' + el.id;
-    const classes = Array.from(el.classList || []).slice(0, 3).join('.');
+    if (el.id) return '#' + CSS.escape(el.id);
+    const classes = Array.from(el.classList || []).slice(0, 3).map(c => CSS.escape(c)).join('.');
     return el.tagName.toLowerCase() + (classes ? '.' + classes : '');
   }
 
@@ -45,8 +45,8 @@ async def run_live_region_evaluator(page: Any) -> List[Dict[str, Any]]:
           const probe = window.__a11yLiveRegionProbe;
           const record = el => {
             if (!el || !el.matches || !el.matches('[aria-live], [role="status"], [role="alert"]')) return;
-            const classes = Array.from(el.classList || []).slice(0, 3).join('.');
-            const locator = el.id ? '#' + el.id : el.tagName.toLowerCase() + (classes ? '.' + classes : '');
+            const classes = Array.from(el.classList || []).slice(0, 3).map(c => CSS.escape(c)).join('.');
+            const locator = el.id ? '#' + CSS.escape(el.id) : el.tagName.toLowerCase() + (classes ? '.' + classes : '');
             probe.events.push({
               locator,
               text: (el.innerText || el.textContent || '').trim().slice(0, 160),
