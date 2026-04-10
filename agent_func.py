@@ -14,6 +14,29 @@ driver: dict[str, object] = {}
 run_test_id = ""
 
 
+def _drop_recent_timer_frames(run_id: str, within_seconds: float = 1.5) -> None:
+    """
+    Remove trailing timer frames that were captured within `within_seconds` ago.
+    Stops as soon as it hits a step frame or an old timer frame.
+
+    Purpose: when a step capture is about to run, any timer frame taken in the
+    same ~1.5 s window shows identical page content (no highlight), creating a
+    visually redundant "double" in the recording.  Removing it keeps one clean
+    highlighted frame per action instead of two near-identical frames.
+    """
+    cutoff = time.time() - within_seconds
+    removed = 0
+    with streaming._LOCK:
+        frames = streaming._RECORDED_FRAMES.get(run_id)
+        if not frames:
+            return
+        while frames and frames[-1].get("trigger") == "timer" and frames[-1]["timestamp"] >= cutoff:
+            frames.pop()
+            removed += 1
+    if removed:
+        logging.debug(f"[StepCapture] Dropped {removed} recent timer frame(s) for {run_id} to prevent duplicate")
+
+
 def clean_html(html_content):
     for tag in ['script', 'style', 'svg']:
         html_content = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html_content, flags=re.DOTALL)
@@ -227,6 +250,15 @@ async def click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     await page.wait_for_selector(locator, state="visible", timeout=150000)
+    # Remove any timer frame that fired in the last ~1.5 s — it shows the same
+    # pre-click page content and would create a visually redundant "double".
+    _drop_recent_timer_frames(_run_test_id)
+    # Capture element highlighted BEFORE the click.
+    await streaming.capture_step_frame_async(
+        run_id=_run_test_id,
+        func_name="click",
+        element_hint={"locator": locator},
+    )
     await page.click(locator)
     return "clicked successfully on the element"
 
@@ -237,6 +269,12 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     await page.wait_for_selector(locator, state="visible", timeout=150000)
+    _drop_recent_timer_frames(_run_test_id)
+    await streaming.capture_step_frame_async(
+        run_id=_run_test_id,
+        func_name="double_click",
+        element_hint={"locator": locator},
+    )
     await page.dblclick(locator)
     return "double clicked"
 
@@ -247,6 +285,12 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     await page.wait_for_selector(locator, state="visible", timeout=150000)
+    _drop_recent_timer_frames(_run_test_id)
+    await streaming.capture_step_frame_async(
+        run_id=_run_test_id,
+        func_name="right_click",
+        element_hint={"locator": locator},
+    )
     await page.click(locator, button='right')
     return "right clicked"
 
@@ -262,6 +306,15 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     await page.wait_for_selector(locator, state="visible", timeout=10000)
+    # PRE-action: show the <select> element highlighted.
+    # (The open/expanded state of a native OS dropdown cannot be captured in a
+    # headless browser screenshot — it is rendered outside the page DOM.)
+    _drop_recent_timer_frames(_run_test_id)
+    await streaming.capture_step_frame_async(
+        run_id=_run_test_id,
+        func_name="select_native_dropdown",
+        element_hint={"locator": locator},
+    )
 
     if by == "value":
         await page.select_option(locator, value=option)
@@ -269,6 +322,14 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
         await page.select_option(locator, index=int(option))
     else:
         await page.select_option(locator, label=option)
+
+    # POST-action: capture the <select> again — it now displays the chosen
+    # option, giving the user a clear "before → after" pair for the step.
+    await streaming.capture_step_frame_async(
+        run_id=_run_test_id,
+        func_name="select_native_dropdown (selected)",
+        element_hint={"locator": locator},
+    )
 
     return "selected"
 
