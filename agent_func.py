@@ -14,6 +14,60 @@ driver: dict[str, object] = {}
 run_test_id = ""
 
 
+def _drop_recent_timer_frames(run_id: str, within_seconds: float = 1.5) -> None:
+    """
+    Remove trailing timer frames captured within `within_seconds` ago.
+    Stops as soon as it hits a step frame or an older timer frame.
+
+    Called just before a pre-action step capture so the recording keeps one
+    clean highlighted frame per action instead of a redundant timer+step pair
+    that shows the same page state twice.
+    """
+    cutoff = time.time() - within_seconds
+    removed = 0
+    with streaming._LOCK:
+        frames = streaming._RECORDED_FRAMES.get(run_id)
+        if not frames:
+            return
+        while frames and frames[-1].get("trigger") == "timer" and frames[-1]["timestamp"] >= cutoff:
+            frames.pop()
+            removed += 1
+    if removed:
+        logging.debug(f"[StepCapture] Dropped {removed} recent timer frame(s) for {run_id} to prevent duplicate")
+
+
+async def _capture_error_frame(run_id: str, func_name: str) -> None:
+    """
+    Take a plain screenshot (no element highlight) when a step fails.
+    Stored as a step frame tagged with the failing function name so the
+    frontend can display what was on screen at the moment of the error.
+    Best-effort — never raises, so it never masks the original exception.
+    """
+    recording_active = run_id in streaming._RECORDING_FLAGS
+    logging.info(
+        f"[ErrorCapture] {func_name} failed — capturing error screenshot "
+        f"(run_id={run_id}, recording_active={recording_active})"
+    )
+    try:
+        # If recording was stopped (or was never started for this run) we
+        # temporarily activate it so the screenshot has somewhere to land.
+        if not recording_active:
+            logging.warning(
+                f"[ErrorCapture] Recording not active for {run_id}; "
+                "activating it so the error frame can be stored."
+            )
+            streaming.start_recording(run_id)
+
+        await streaming.capture_step_frame_async(
+            run_id=run_id,
+            func_name=f"{func_name} (error)",
+            element_hint=None,
+        )
+        logging.info(f"[ErrorCapture] Error screenshot stored for {func_name}")
+    except Exception as exc:
+        logging.warning(f"[ErrorCapture] Error screenshot failed for {func_name}: {exc}")
+
+
 def clean_html(html_content):
     for tag in ['script', 'style', 'svg']:
         html_content = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html_content, flags=re.DOTALL)
@@ -145,7 +199,11 @@ async def navigate_to_url(url: str, _run_test_id='1', use_vars='false') -> str:
     page = driver[_run_test_id]['page']
     if use_vars == 'true' and _run_test_id in test_variables:
         url = test_variables[_run_test_id].get(url, url)
-    await page.goto(url)
+    try:
+        await page.goto(url)
+    except Exception:
+        await _capture_error_frame(_run_test_id, "navigate_to_url")
+        raise
     return url
 
 async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 'false') -> str:
@@ -166,8 +224,12 @@ async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     if use_vars == 'true' and _run_test_id in test_variables:
         value = test_variables[_run_test_id].get(value, value)
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
-    await page.fill(locator, value)
+    try:
+        await page.wait_for_selector(locator, state="visible", timeout=10000)
+        await page.fill(locator, value)
+    except Exception:
+        await _capture_error_frame(_run_test_id, "send_keys")
+        raise
     return "sent keys"
 
 async def exists(locator: str, _run_test_id='1') -> str:
@@ -176,7 +238,11 @@ async def exists(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=15000)
+    try:
+        await page.wait_for_selector(locator, state="visible", timeout=15000)
+    except Exception:
+        await _capture_error_frame(_run_test_id, "exists")
+        raise
     return "exists"
 
 async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false') -> str:
@@ -188,7 +254,11 @@ async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false')
     if use_vars == 'true' and _run_test_id in test_variables:
         text = test_variables[_run_test_id].get(text, text)
     locator = f"text={text}"
-    await page.wait_for_selector(locator, timeout=15000)
+    try:
+        await page.wait_for_selector(locator, timeout=15000)
+    except Exception:
+        await _capture_error_frame(_run_test_id, "exists_with_text")
+        raise
     return "exists (text)"
 
 async def does_not_exist(locator: str, _run_test_id='1') -> str:
@@ -197,7 +267,11 @@ async def does_not_exist(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state='detached', timeout=15000)
+    try:
+        await page.wait_for_selector(locator, state='detached', timeout=15000)
+    except Exception:
+        await _capture_error_frame(_run_test_id, "does_not_exist")
+        raise
     return "doesn't exists"
 
 async def scroll_to_element(locator: str, _run_test_id='1') -> str:
@@ -206,8 +280,12 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=150000)
-    await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
+    try:
+        await page.wait_for_selector(locator, timeout=150000)
+        await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
+    except Exception:
+        await _capture_error_frame(_run_test_id, "scroll_to_element")
+        raise
     return "scrolled"
 
 async def click(locator: str, _run_test_id='1') -> str:
@@ -226,8 +304,22 @@ async def click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=150000)
-    await page.click(locator)
+    try:
+        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        # Remove any timer frame fired in the last ~1.5 s — it shows the same
+        # pre-click state and would create a redundant duplicate in the recording.
+        _drop_recent_timer_frames(_run_test_id)
+        # Capture the element highlighted BEFORE clicking so the frame shows the
+        # button/link that was clicked, not the post-navigation page.
+        await streaming.capture_step_frame_async(
+            run_id=_run_test_id,
+            func_name="click",
+            element_hint={"locator": locator},
+        )
+        await page.click(locator)
+    except Exception:
+        await _capture_error_frame(_run_test_id, "click")
+        raise
     return "clicked successfully on the element"
 
 async def double_click(locator: str, _run_test_id='1') -> str:
@@ -236,8 +328,18 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=150000)
-    await page.dblclick(locator)
+    try:
+        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        _drop_recent_timer_frames(_run_test_id)
+        await streaming.capture_step_frame_async(
+            run_id=_run_test_id,
+            func_name="double_click",
+            element_hint={"locator": locator},
+        )
+        await page.dblclick(locator)
+    except Exception:
+        await _capture_error_frame(_run_test_id, "double_click")
+        raise
     return "double clicked"
 
 async def right_click(locator: str, _run_test_id='1') -> str:
@@ -246,8 +348,18 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=150000)
-    await page.click(locator, button='right')
+    try:
+        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        _drop_recent_timer_frames(_run_test_id)
+        await streaming.capture_step_frame_async(
+            run_id=_run_test_id,
+            func_name="right_click",
+            element_hint={"locator": locator},
+        )
+        await page.click(locator, button='right')
+    except Exception:
+        await _capture_error_frame(_run_test_id, "right_click")
+        raise
     return "right clicked"
 
 async def select_native_dropdown(locator: str, option: str, by: str = "label", _run_test_id='1') -> str:
@@ -261,15 +373,33 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
-
-    if by == "value":
-        await page.select_option(locator, value=option)
-    elif by == "index":
-        await page.select_option(locator, index=int(option))
-    else:
-        await page.select_option(locator, label=option)
-
+    try:
+        await page.wait_for_selector(locator, state="visible", timeout=10000)
+        # PRE-action: show the <select> element highlighted.
+        # (The open/expanded state of a native OS select cannot be captured in a
+        # headless browser screenshot — it is rendered outside the page DOM.)
+        _drop_recent_timer_frames(_run_test_id)
+        await streaming.capture_step_frame_async(
+            run_id=_run_test_id,
+            func_name="select_native_dropdown",
+            element_hint={"locator": locator},
+        )
+        if by == "value":
+            await page.select_option(locator, value=option)
+        elif by == "index":
+            await page.select_option(locator, index=int(option))
+        else:
+            await page.select_option(locator, label=option)
+        # POST-action: the <select> now shows the chosen option — capture it to
+        # give the user a clear before → after pair for this step.
+        await streaming.capture_step_frame_async(
+            run_id=_run_test_id,
+            func_name="select_native_dropdown (selected)",
+            element_hint={"locator": locator},
+        )
+    except Exception:
+        await _capture_error_frame(_run_test_id, "select_native_dropdown")
+        raise
     return "selected"
 
 async def get_page_html(_run_test_id='1') -> str:
