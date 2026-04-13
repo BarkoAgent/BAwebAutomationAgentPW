@@ -16,16 +16,6 @@ logging.basicConfig(
 )
 
 
-def normalize_ws_env():
-    """
-    Make local websocket configuration work with the SDK's expected env names.
-    """
-    backend_ws_base = os.getenv("BACKEND_WS_BASE")
-
-    if backend_ws_base:
-        os.environ["DEFAULT_WS_BASE"] = backend_ws_base
-
-
 def install_playwright_runtime():
     """
     Install Playwright browsers using the same interpreter running this process.
@@ -55,7 +45,6 @@ async def main():
     - ENABLE_STREAMING:
         'true'/'1' to enable frame streaming
     """
-    normalize_ws_env()
 
     backend_ws_uri = os.getenv("BACKEND_WS_URI")
     if not backend_ws_uri:

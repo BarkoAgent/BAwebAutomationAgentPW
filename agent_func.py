@@ -250,10 +250,7 @@ async def click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     await page.wait_for_selector(locator, state="visible", timeout=150000)
-    # Remove any timer frame that fired in the last ~1.5 s — it shows the same
-    # pre-click page content and would create a visually redundant "double".
     _drop_recent_timer_frames(_run_test_id)
-    # Capture element highlighted BEFORE the click.
     await streaming.capture_step_frame_async(
         run_id=_run_test_id,
         func_name="click",
@@ -306,9 +303,6 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     await page.wait_for_selector(locator, state="visible", timeout=10000)
-    # PRE-action: show the <select> element highlighted.
-    # (The open/expanded state of a native OS dropdown cannot be captured in a
-    # headless browser screenshot — it is rendered outside the page DOM.)
     _drop_recent_timer_frames(_run_test_id)
     await streaming.capture_step_frame_async(
         run_id=_run_test_id,
@@ -323,8 +317,6 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     else:
         await page.select_option(locator, label=option)
 
-    # POST-action: capture the <select> again — it now displays the chosen
-    # option, giving the user a clear "before → after" pair for the step.
     await streaming.capture_step_frame_async(
         run_id=_run_test_id,
         func_name="select_native_dropdown (selected)",
