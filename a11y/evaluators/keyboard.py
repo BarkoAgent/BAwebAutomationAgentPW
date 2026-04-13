@@ -290,9 +290,14 @@ async def run_keyboard_smoke_evaluator(page: Any) -> List[Dict[str, Any]]:
     elif reachability_ratio >= 0.5:
         outcome_211 = OUTCOME_PASSED
         severity_211 = ""
-        message_211 = "Keyboard smoke reached {} of {} interactive targets; activation confirmed where tested.".format(
-            len(unique_locators), len(interactives)
-        )
+        if activation_result:
+            message_211 = "Keyboard smoke reached {} of {} interactive targets; activation confirmed.".format(
+                len(unique_locators), len(interactives)
+            )
+        else:
+            message_211 = "Keyboard smoke reached {} of {} interactive targets; activation not tested (no safe probe element).".format(
+                len(unique_locators), len(interactives)
+            )
     else:
         outcome_211 = OUTCOME_NEEDS_REVIEW
         severity_211 = "moderate"

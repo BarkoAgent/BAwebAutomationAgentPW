@@ -41,11 +41,11 @@ def _contrast_row_html(item: Dict[str, Any]) -> str:
     bg       = check.get("bgColor")
 
     parts: List[str] = []
-    if ratio and ratio > 0:
+    if ratio and ratio >= 1:
         parts.append("{:.2f}:1 actual".format(ratio))
-    if expected:
-        parts.append("{} required".format(expected))
-    if msg_key:
+        if expected:
+            parts.append("{} required".format(expected))
+    elif msg_key:
         reason = _CONTRAST_INCOMPLETE_REASONS.get(msg_key, msg_key)
         parts.append("not computed \u2014 {}".format(reason))
 
