@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List
 
 from ._helpers import _escape, _status_badge, _render_sources, _source_label
@@ -8,6 +9,142 @@ from ._helpers import _escape, _status_badge, _render_sources, _source_label
 
 _OUTCOME_PRIORITY = {"FAILED": 0, "ERROR": 0, "NEEDS_REVIEW": 1, "PASSED": 2, "NOT_APPLICABLE": 3, "NOT_TESTED": 4}
 _EVIDENCE_LIMIT = 3
+
+_CONTRAST_INCOMPLETE_REASONS: Dict[str, str] = {
+    "bgImage":       "background image prevents automated measurement",
+    "bgGradient":    "background gradient prevents automated measurement",
+    "pseudoContent": "pseudo-element content involved",
+    "shadowDOM":     "shadow DOM element",
+    "opacity":       "opacity on ancestor affects colour",
+    "elmFocus":      "element must receive focus to resolve colour",
+    "cssProperty":   "CSS property prevents colour resolution",
+}
+
+
+def _clean_axe_message(msg: str) -> str:
+    """Strip 'Fix reason for <rule>: ' prefix that axe prepends to failure summaries."""
+    return re.sub(r"^Fix reason for [^:]+:\s*", "", msg).strip()
+
+
+def _contrast_row_html(item: Dict[str, Any]) -> str:
+    """Return an ev-row with contrast data for axe:color-contrast items, or ''."""
+    if not (item.get("source") or "").startswith("axe:color-contrast"):
+        return ""
+    check = (item.get("metadata") or {}).get("nodeCheckData") or {}
+    if not check:
+        return ""
+
+    ratio    = check.get("contrastRatio")
+    expected = check.get("expectedContrastRatio")
+    msg_key  = check.get("messageKey", "")
+    fg       = check.get("fgColor")
+    bg       = check.get("bgColor")
+
+    parts: List[str] = []
+    if ratio and ratio > 0:
+        parts.append("{:.2f}:1 actual".format(ratio))
+    if expected:
+        parts.append("{} required".format(expected))
+    if msg_key:
+        reason = _CONTRAST_INCOMPLETE_REASONS.get(msg_key, msg_key)
+        parts.append("not computed \u2014 {}".format(reason))
+
+    if not parts:
+        return ""
+
+    swatch = ""
+    if fg:
+        swatch += (
+            '<span style="display:inline-block;width:12px;height:12px;background:{fg};'
+            'border:1px solid #999;vertical-align:middle;margin-right:2px"></span>'
+        ).format(fg=_escape(fg))
+    if bg:
+        swatch += (
+            '<span style="display:inline-block;width:12px;height:12px;background:{bg};'
+            'border:1px solid #999;vertical-align:middle;margin-right:4px"></span>'
+        ).format(bg=_escape(bg))
+
+    return (
+        '<div class="ev-row"><span class="label">Contrast</span>'
+        "<span>{swatch}{text}</span></div>"
+    ).format(swatch=swatch, text=_escape(" \u2014 ".join(parts)))
+
+
+_LIMIT_EXPLANATIONS: Dict[str, str] = {
+    "bgImage": (
+        "<strong>Background image</strong> \u2014 The colour under the text depends on which "
+        "part of the image renders at that position. Axe runs as JavaScript and cannot sample "
+        "pixels from the live render."
+    ),
+    "bgGradient": (
+        "<strong>Background gradient</strong> \u2014 The gradient colour at the text position "
+        "is determined by element size and layout at runtime, which cannot be computed from CSS alone."
+    ),
+    "opacity": (
+        "<strong>Ancestor opacity</strong> \u2014 A parent element has <code>opacity &lt; 1</code>, "
+        "blending the background with whatever is visually behind it. This is resolved by the "
+        "browser\u2019s compositor, not by CSS."
+    ),
+    "shadowDOM": (
+        "<strong>Shadow DOM</strong> \u2014 The element is inside a shadow root; axe cannot "
+        "traverse the composed tree to accumulate parent background colours."
+    ),
+    "elmFocus": (
+        "<strong>Focus state</strong> \u2014 The background colour only applies when the element "
+        "is focused. Axe scans the page in a neutral state and cannot trigger focus for every element."
+    ),
+    "pseudoContent": (
+        "<strong>Pseudo-element</strong> \u2014 Text rendered via <code>::before</code> or "
+        "<code>::after</code> doesn\u2019t produce a DOM node that axe can measure."
+    ),
+    "cssProperty": (
+        "<strong>CSS property</strong> \u2014 A property such as <code>mix-blend-mode</code> or "
+        "<code>filter</code> affects the rendered colour in a way that cannot be resolved from "
+        "computed styles alone."
+    ),
+}
+
+
+def _automation_limit_callout(criterion: Dict[str, Any]) -> str:
+    """
+    Return a collapsible explanation block when NEEDS_REVIEW evidence has known
+    automation limits (e.g. background images blocking contrast calculation).
+    Returns '' for all other criteria or outcomes.
+    """
+    if criterion.get("outcome_status") != "NEEDS_REVIEW":
+        return ""
+
+    reasons: List[str] = []
+    for item in (criterion.get("evidence") or []):
+        if item.get("outcome") != "NEEDS_REVIEW":
+            continue
+        if not (item.get("source") or "").startswith("axe:color-contrast"):
+            continue
+        key = ((item.get("metadata") or {}).get("nodeCheckData") or {}).get("messageKey", "")
+        if key and key not in reasons:
+            reasons.append(key)
+
+    if not reasons:
+        return ""
+
+    items_html = "".join(
+        "<li>{}</li>".format(_LIMIT_EXPLANATIONS.get(r, "<strong>{}</strong>".format(_escape(r))))
+        for r in reasons
+    )
+
+    return (
+        '<details class="automation-limit-callout">'
+        "<summary>Why can\u2019t this be fully automated?</summary>"
+        '<div class="automation-limit-body">'
+        "<p>These elements could not be verified automatically because:</p>"
+        "<ul>{items}</ul>"
+        "<p><strong>How to verify:</strong> Open browser DevTools, inspect the element, and check "
+        "the Accessibility panel \u2014 Chrome shows the computed contrast ratio directly. "
+        "Alternatively use the eyedropper in the DevTools Colour Picker to sample the exact "
+        "foreground and background colours, then run them through the WebAIM Contrast Checker.</p>"
+        "</div>"
+        "</details>"
+    ).format(items=items_html)
 
 
 def _criterion_csv_row(criterion: Dict[str, Any]) -> str:
@@ -43,7 +180,21 @@ def _outcome_summary(criterion: Dict[str, Any]) -> str:
         msg = _first_issue_message(criterion) or (notes[0] if notes else "See evidence below.")
         return '<p class="action-item action-failed"><strong>Fix:</strong> {}</p>'.format(_escape(msg))
     if outcome == "NEEDS_REVIEW":
-        msg = notes[0] if notes else "Manual verification required \u2014 no automated check covers this criterion in the current flow."
+        if notes:
+            msg = notes[0]
+        else:
+            detected = _first_issue_message(criterion)
+            if detected:
+                msg = (
+                    "Automation flagged this but could not confirm a violation: \u201c{}\u201d "
+                    "\u2014 verify each element manually (e.g. using browser DevTools colour picker "
+                    "or the WebAIM Contrast Checker).".format(_clean_axe_message(detected))
+                )
+            else:
+                msg = (
+                    "Automation could not determine pass or fail for this criterion "
+                    "\u2014 check it manually in the tested flow."
+                )
         return '<p class="action-item action-review"><strong>Check:</strong> {}</p>'.format(_escape(msg))
     if outcome == "PASSED":
         return '<p class="outcome-summary-text">Tested \u2014 no violations found.</p>'
@@ -82,6 +233,7 @@ def _render_evidence_items(evidence: List[Dict[str, Any]]) -> str:
         if element_val:
             display = element_val if len(element_val) <= 160 else element_val[:160] + "\u2026"
             primary_html += '<div class="ev-row"><span class="label">Element</span><code>{}</code></div>'.format(_escape(display))
+        primary_html += _contrast_row_html(item)
         if screenshot_ref and screenshot_ref.startswith("data:"):
             primary_html += '<div class="ev-row"><img class="evidence-screenshot" src="{}" alt="Screenshot" loading="lazy"></div>'.format(screenshot_ref)
         elif screenshot_ref:
@@ -221,6 +373,7 @@ def _render_criterion_panels(criteria: List[Dict[str, Any]]) -> str:
                 </div>
               </div>
               {outcome_summary}
+              {limit_callout}
               {evidence_html}
               {coverage_details}
             </section>
@@ -237,6 +390,7 @@ def _render_criterion_panels(criteria: List[Dict[str, Any]]) -> str:
                 doc_url=_escape(criterion.get("doc_url", "")),
                 outcome=_status_badge(criterion.get("outcome_status", "")),
                 outcome_summary=_outcome_summary(criterion),
+                limit_callout=_automation_limit_callout(criterion),
                 evidence_html=evidence_html,
                 coverage_details=coverage_details,
                 csv_data=_criterion_csv_row(criterion),

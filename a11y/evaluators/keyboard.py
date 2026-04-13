@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List
 
-from ..models import COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW
+from ..models import COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW, OUTCOME_PASSED
 
 
 INTERACTIVE_SELECTOR = (
@@ -114,6 +114,31 @@ selector => Array.from(document.querySelectorAll(selector))
 """
 
 
+def _detect_cycle(seq: List[str], min_cycle: int = 2, max_cycle: int = 4) -> bool:
+    """Return True if seq ends in a repeated cycle — indicates a focus trap."""
+    for length in range(min_cycle, max_cycle + 1):
+        if len(seq) >= length * 2:
+            if seq[-length:] == seq[-(length * 2):-length]:
+                return True
+    return False
+
+
+def _check_focus_visible(forward_trace: List[Dict[str, Any]]) -> List[str]:
+    """Return locators of focused elements with no detectable outline or box-shadow."""
+    failures = []
+    for entry in forward_trace:
+        if not entry or not entry.get("locator"):
+            continue
+        outline = entry.get("outlineStyle", "")
+        outline_w = entry.get("outlineWidth", "")
+        shadow = entry.get("boxShadow", "")
+        no_outline = outline in ("none", "") or outline_w in ("0px", "0", "")
+        no_shadow = shadow in ("none", "", "0px 0px 0px 0px")
+        if no_outline and no_shadow:
+            failures.append(entry["locator"])
+    return failures
+
+
 async def run_keyboard_smoke_evaluator(page: Any) -> List[Dict[str, Any]]:
     interactives: List[Dict[str, Any]] = await page.evaluate(VISIBLE_INTERACTIVES_SCRIPT, INTERACTIVE_SELECTOR)
     if not interactives:
@@ -123,12 +148,17 @@ async def run_keyboard_smoke_evaluator(page: Any) -> List[Dict[str, Any]]:
     reverse_trace: List[Dict[str, Any]] = []
     unique_locators = set()
     lost_focus = False
+    lost_focus_reason = ""   # "null_active" | "body" | "html"
+    lost_focus_at_index = -1
     tab_attempts = min(max(len(interactives) + 1, 4), 12)
 
-    for _ in range(tab_attempts):
+    for i in range(tab_attempts):
         await page.keyboard.press("Tab")
         active = await page.evaluate(ACTIVE_ELEMENT_SCRIPT)
         if not active:
+            if not lost_focus:
+                lost_focus_reason = "null_active"
+                lost_focus_at_index = i
             lost_focus = True
             forward_trace.append({"locator": "", "tag": "", "text": ""})
             continue
@@ -137,6 +167,9 @@ async def run_keyboard_smoke_evaluator(page: Any) -> List[Dict[str, Any]]:
         if locator:
             unique_locators.add(locator)
         if active.get("tag") in {"body", "html"}:
+            if not lost_focus:
+                lost_focus_reason = active.get("tag", "body")
+                lost_focus_at_index = i
             lost_focus = True
 
     reverse_attempts = min(4, len(forward_trace))
@@ -183,6 +216,8 @@ async def run_keyboard_smoke_evaluator(page: Any) -> List[Dict[str, Any]]:
         "reverse_tab_trace": reverse_trace,
         "unique_focus_count": len(unique_locators),
         "reverse_stuck_count": reverse_stuck_count,
+        "lost_focus_reason": lost_focus_reason,
+        "lost_focus_at_tab_press": lost_focus_at_index + 1 if lost_focus_at_index >= 0 else None,
         "activation_probe": activation_probe,
         "activation_result": activation_result,
     }
@@ -198,52 +233,166 @@ async def run_keyboard_smoke_evaluator(page: Any) -> List[Dict[str, Any]]:
             activation_result.get("beforeLocator") == activation_result.get("afterLocator")
         )
 
-    if lost_focus or len(unique_locators) == 0 or reverse_stuck_count >= max(2, reverse_attempts - 1):
-        message = "Keyboard smoke test lost meaningful focus while tabbing through visible interactive elements."
-        severity = "serious"
-        outcome = OUTCOME_FAILED
-    elif activation_failed:
-        message = "Keyboard smoke focused a safe interactive element but Enter and Space did not produce an observable activation signal."
-        severity = "serious"
-        outcome = OUTCOME_FAILED
-    else:
-        message = "Keyboard smoke reached {} distinct focus targets and sampled reverse tab behavior; full task-flow review is still required.".format(len(unique_locators))
-        severity = "moderate"
-        outcome = OUTCOME_NEEDS_REVIEW
+    # --- Derived signals ---
+    locator_sequence = [f.get("locator", "") for f in forward_trace if f.get("locator")]
+    focus_trapped = _detect_cycle(locator_sequence)
+    reachability_ratio = len(unique_locators) / max(len(interactives), 1)
+    focus_visible_failures = _check_focus_visible(forward_trace)
 
     first_locator = forward_trace[0].get("locator") if forward_trace and forward_trace[0] else ""
     first_text = forward_trace[0].get("text") if forward_trace and forward_trace[0] else ""
+    anchor_locator = first_locator or interactives[0].get("locator", "")
+    anchor_text = first_text or interactives[0].get("text", "")
 
     results: List[Dict[str, Any]] = []
-    for criterion_id in ["2.1.1", "2.1.2", "2.4.3"]:
-        results.append(
-            {
-                "criterion_id": criterion_id,
-                "source": "custom:keyboard_smoke",
-                "coverage_status": COVERAGE_SEMI_AUTOMATED,
-                "outcome": outcome,
-                "severity": severity,
-                "message": message,
-                "locator": first_locator or interactives[0].get("locator", ""),
-                "element_text": first_text or interactives[0].get("text", ""),
-                "metadata": base_metadata,
-            }
+
+    # --- 2.1.1 Keyboard ---
+    if lost_focus or len(unique_locators) == 0:
+        outcome_211 = OUTCOME_FAILED
+        severity_211 = "serious"
+        unique_count = len(unique_locators)
+        total_count = len(interactives)
+        visited_sample = ", ".join(list(unique_locators)[:4]) or "none"
+        if unique_count == 0:
+            message_211 = (
+                "Tab key produced no focus movement — none of {} visible interactive "
+                "elements were reachable by keyboard.".format(total_count)
+            )
+        elif lost_focus_reason == "null_active":
+            message_211 = (
+                "Focus disappeared at Tab press {} (document.activeElement became null) — "
+                "keyboard navigation broke mid-flow. "
+                "{} of {} interactive elements reached before failure. "
+                "Visited: {}.".format(
+                    lost_focus_at_index + 1, unique_count, total_count, visited_sample
+                )
+            )
+        elif lost_focus_reason in ("body", "html"):
+            message_211 = (
+                "Focus escaped to <{}> at Tab press {} — "
+                "the Tab key left the page's interactive content instead of moving to the next element. "
+                "{} of {} interactive elements reached before escape. "
+                "Visited: {}.".format(
+                    lost_focus_reason, lost_focus_at_index + 1,
+                    unique_count, total_count, visited_sample
+                )
+            )
+        else:
+            message_211 = (
+                "Keyboard navigation lost focus unexpectedly. "
+                "{} of {} interactive elements reached. "
+                "Visited: {}.".format(unique_count, total_count, visited_sample)
+            )
+    elif activation_failed:
+        outcome_211 = OUTCOME_FAILED
+        severity_211 = "serious"
+        message_211 = "Keyboard smoke focused a safe interactive element but Enter and Space did not produce an observable activation signal."
+    elif reachability_ratio >= 0.5:
+        outcome_211 = OUTCOME_PASSED
+        severity_211 = ""
+        message_211 = "Keyboard smoke reached {} of {} interactive targets; activation confirmed where tested.".format(
+            len(unique_locators), len(interactives)
+        )
+    else:
+        outcome_211 = OUTCOME_NEEDS_REVIEW
+        severity_211 = "moderate"
+        message_211 = "Keyboard smoke reached {} of {} targets; coverage insufficient for automated pass — manual review required.".format(
+            len(unique_locators), len(interactives)
         )
 
-    focus_visible_message = (
-        "Keyboard smoke captured focus transitions; visual focus treatment still requires reviewer confirmation."
-    )
-    results.append(
-        {
-            "criterion_id": "2.4.7",
-            "source": "custom:keyboard_smoke",
-            "coverage_status": COVERAGE_SEMI_AUTOMATED,
-            "outcome": OUTCOME_NEEDS_REVIEW,
-            "severity": "moderate",
-            "message": focus_visible_message,
-            "locator": first_locator or interactives[0].get("locator", ""),
-            "element_text": first_text or interactives[0].get("text", ""),
-            "metadata": base_metadata,
-        }
-    )
+    results.append({
+        "criterion_id": "2.1.1",
+        "source": "custom:keyboard_smoke",
+        "coverage_status": COVERAGE_SEMI_AUTOMATED,
+        "outcome": outcome_211,
+        "severity": severity_211,
+        "message": message_211,
+        "locator": anchor_locator,
+        "element_text": anchor_text,
+        "metadata": base_metadata,
+    })
+
+    # --- 2.1.2 No Keyboard Trap ---
+    if focus_trapped:
+        outcome_212 = OUTCOME_FAILED
+        severity_212 = "serious"
+        message_212 = "Focus trap detected: tab order cycled through the same element sequence repeatedly."
+    elif reverse_stuck_count >= max(2, reverse_attempts - 1):
+        outcome_212 = OUTCOME_FAILED
+        severity_212 = "serious"
+        message_212 = "Reverse tab (Shift+Tab) repeatedly landed on the same element — possible keyboard trap."
+    elif reverse_attempts > 0 and len(unique_locators) > 1:
+        outcome_212 = OUTCOME_PASSED
+        severity_212 = ""
+        message_212 = "Reverse tab navigated freely with no repeated cycle or stuck focus detected."
+    else:
+        outcome_212 = OUTCOME_NEEDS_REVIEW
+        severity_212 = "moderate"
+        message_212 = "Insufficient reverse tab sample to confirm absence of keyboard traps."
+
+    results.append({
+        "criterion_id": "2.1.2",
+        "source": "custom:keyboard_smoke",
+        "coverage_status": COVERAGE_SEMI_AUTOMATED,
+        "outcome": outcome_212,
+        "severity": severity_212,
+        "message": message_212,
+        "locator": anchor_locator,
+        "element_text": anchor_text,
+        "metadata": base_metadata,
+    })
+
+    # --- 2.4.3 Focus Order ---
+    # Logical sequence requires human judgement; report observed coverage for context
+    if len(unique_locators) >= 3:
+        message_243 = "Focus visited {} unique targets in sequence; logical order requires manual verification of meaningful tab flow.".format(
+            len(unique_locators)
+        )
+    else:
+        message_243 = "Too few focus targets sampled ({} unique) to assess order; manual review required.".format(
+            len(unique_locators)
+        )
+
+    results.append({
+        "criterion_id": "2.4.3",
+        "source": "custom:keyboard_smoke",
+        "coverage_status": COVERAGE_SEMI_AUTOMATED,
+        "outcome": OUTCOME_NEEDS_REVIEW,
+        "severity": "moderate",
+        "message": message_243,
+        "locator": anchor_locator,
+        "element_text": anchor_text,
+        "metadata": base_metadata,
+    })
+
+    # --- 2.4.7 Focus Visible ---
+    visible_entries = [e for e in forward_trace if e and e.get("locator")]
+    if focus_visible_failures:
+        focus_visible_outcome = OUTCOME_FAILED
+        focus_visible_severity = "serious"
+        focus_visible_message = "{} of {} focused elements showed no detectable outline or box-shadow: {}".format(
+            len(focus_visible_failures),
+            len(visible_entries),
+            ", ".join(focus_visible_failures[:5]),
+        )
+    else:
+        focus_visible_outcome = OUTCOME_NEEDS_REVIEW
+        focus_visible_severity = "moderate"
+        focus_visible_message = (
+            "CSS outline and box-shadow appear present on sampled focus targets; "
+            "visual confirmation still required."
+        )
+
+    results.append({
+        "criterion_id": "2.4.7",
+        "source": "custom:keyboard_smoke",
+        "coverage_status": COVERAGE_SEMI_AUTOMATED,
+        "outcome": focus_visible_outcome,
+        "severity": focus_visible_severity,
+        "message": focus_visible_message,
+        "locator": anchor_locator,
+        "element_text": anchor_text,
+        "metadata": base_metadata,
+    })
+
     return results

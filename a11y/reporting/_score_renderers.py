@@ -90,8 +90,9 @@ def _weighted_sums(criteria: List[Dict[str, Any]]) -> Tuple[int, int]:
         level = c.get("level", "AA")
         if outcome == "PASSED":
             wp += _PASS_WEIGHT.get(level, 7)
-        elif outcome in ("FAILED", "ERROR", "NEEDS_REVIEW"):
+        elif outcome in ("FAILED", "ERROR"):
             wf += _FAIL_WEIGHT.get(level, 14)
+        # NEEDS_REVIEW is unresolved evidence — excluded from both sides until confirmed
     return wp, wf
 
 
@@ -118,9 +119,12 @@ def _potential_gain(criteria: List[Dict[str, Any]], *outcomes: str) -> int:
         _PASS_WEIGHT.get(c.get("level", "AA"), 7)
         for c in criteria if c.get("outcome_status") in outcomes
     )
+    # Only release fail-weight for outcomes that were actually counted as failures.
+    # NEEDS_REVIEW is not in wf, so resolving it adds to wp only.
     freed_wf = sum(
         _FAIL_WEIGHT.get(c.get("level", "AA"), 14)
-        for c in criteria if c.get("outcome_status") in outcomes
+        for c in criteria
+        if c.get("outcome_status") in outcomes and c.get("outcome_status") in ("FAILED", "ERROR")
     )
     new_wp = wp + extra_wp
     new_wf = wf - freed_wf
@@ -249,11 +253,17 @@ def render_health_panel(score: int, criteria: List[Dict[str, Any]]) -> str:
                 f=failed, g=failed_gain
             )
         )
-    if review_gain:
+    if review > 0:
+        pl = "s" if review != 1 else ""
+        if review_gain:
+            review_detail = 'Confirm these to unlock <strong>~{g}&thinsp;pts</strong>'.format(g=review_gain)
+        else:
+            review_detail = 'No score impact yet &mdash; human confirmation needed'
         gains.append(
-            '<div class="gain-row"><span class="gain-badge gain-review">{r}&nbsp;in&nbsp;review</span>'
-            '<span>Resolve to recover <strong>~{g}&thinsp;pts</strong></span></div>'.format(
-                r=review, g=review_gain
+            '<div class="gain-row"><span class="gain-badge gain-review">'
+            '{r}&nbsp;open&nbsp;question{pl}</span>'
+            '<span>{detail}</span></div>'.format(
+                r=review, pl=pl, detail=review_detail
             )
         )
     if not gains:
@@ -372,47 +382,135 @@ def render_category_breakdown(criteria: List[Dict[str, Any]]) -> str:
 
 
 def render_top_components(criteria: List[Dict[str, Any]], limit: int = 10) -> str:
-    freq: Dict[str, int] = {}
+    failed_freq: Dict[str, int] = {}
+    review_freq: Dict[str, int] = {}
     for c in criteria:
         for item in c.get("evidence", []):
-            if item.get("outcome") not in ("FAILED", "ERROR", "NEEDS_REVIEW"):
+            outcome = item.get("outcome")
+            if outcome not in ("FAILED", "ERROR", "NEEDS_REVIEW"):
                 continue
+            is_review = outcome == "NEEDS_REVIEW"
             for target in item.get("target", []):
                 sel = str(target).strip()
                 if sel:
-                    freq[sel] = freq.get(sel, 0) + 1
-    top = sorted(freq.items(), key=lambda x: -x[1])[:limit]
+                    if is_review:
+                        review_freq[sel] = review_freq.get(sel, 0) + 1
+                    else:
+                        failed_freq[sel] = failed_freq.get(sel, 0) + 1
+    all_sels = set(failed_freq) | set(review_freq)
+    top = sorted(all_sels, key=lambda s: -(failed_freq.get(s, 0) + review_freq.get(s, 0)))[:limit]
     if not top:
-        return '<p class="muted">No failing component selectors found in evidence.</p>'
-    max_cnt = top[0][1]
+        return '<p class="muted">No affected component selectors found in evidence.</p>'
+    max_total = max(failed_freq.get(s, 0) + review_freq.get(s, 0) for s in top)
     rows: List[str] = []
-    for selector, count in top:
-        bw      = int(count / max_cnt * 100)
+    for selector in top:
+        f_cnt   = failed_freq.get(selector, 0)
+        r_cnt   = review_freq.get(selector, 0)
+        f_pct   = int(f_cnt / max_total * 100)
+        r_pct   = int(r_cnt / max_total * 100)
         display = selector if len(selector) <= 56 else selector[:54] + "\u2026"
+        f_muted = ' comp-count-zero' if f_cnt == 0 else ''
+        r_muted = ' comp-count-zero' if r_cnt == 0 else ''
         rows.append((
             '<div class="component-row" data-selector="{sel}">'
             '<code class="comp-selector" title="{sel}">{disp}</code>'
-            '<div class="comp-bar"><div class="comp-bar-fill" style="width:{bw}%"></div></div>'
-            '<span class="comp-count">{cnt}</span>'
+            '<div class="comp-bar">'
+            '<div class="comp-bar-fail" style="width:{fpct}%"></div>'
+            '<div class="comp-bar-review" style="width:{rpct}%"></div>'
             '</div>'
-        ).format(sel=_escape(selector), disp=_escape(display), bw=bw, cnt=count))
+            '<span class="comp-count-fail{fm}">{fcnt}</span>'
+            '<span class="comp-count-review{rm}">{rcnt}</span>'
+            '</div>'
+        ).format(
+            sel=_escape(selector), disp=_escape(display),
+            fpct=f_pct, rpct=r_pct,
+            fcnt=f_cnt, rcnt=r_cnt,
+            fm=f_muted, rm=r_muted,
+        ))
     return '<div class="components-list">{}</div>'.format("".join(rows))
 
 
-def render_compliance_badges(criteria: List[Dict[str, Any]]) -> str:
-    levels = {c.get("level", "") for c in criteria if c.get("outcome_status") != "NOT_APPLICABLE"}
-    badges: List[str] = []
-    if "A" in levels and "AA" in levels:
-        badges = ["WCAG 2.1 AA", "Section 508", "ADA", "EAA"]
-    elif "A" in levels:
-        badges = ["WCAG 2.1 A"]
-    if "AAA" in levels:
-        badges.append("WCAG 2.1 AAA")
+_STANDARD_LABELS: Dict[str, str] = {
+    "wcag22aa":  "WCAG 2.2 AA",
+    "wcag22aaa": "WCAG 2.2 AAA",
+    "wcag22a":   "WCAG 2.2 A",
+    "wcag21aa":  "WCAG 2.1 AA",
+    "wcag21aaa": "WCAG 2.1 AAA",
+    "wcag21a":   "WCAG 2.1 A",
+    "wcag20aa":  "WCAG 2.0 AA",
+    "wcag20a":   "WCAG 2.0 A",
+}
+
+_BADGE_URLS: Dict[str, str] = {
+    "WCAG 2.2 AA":  "https://www.w3.org/TR/WCAG22/",
+    "WCAG 2.2 AAA": "https://www.w3.org/TR/WCAG22/",
+    "WCAG 2.2 A":   "https://www.w3.org/TR/WCAG22/",
+    "WCAG 2.1 AA":  "https://www.w3.org/TR/WCAG21/",
+    "WCAG 2.1 AAA": "https://www.w3.org/TR/WCAG21/",
+    "WCAG 2.1 A":   "https://www.w3.org/TR/WCAG21/",
+    "WCAG 2.0 AA":  "https://www.w3.org/TR/WCAG20/",
+    "WCAG 2.0 A":   "https://www.w3.org/TR/WCAG20/",
+}
+
+
+def render_compliance_badges(criteria: List[Dict[str, Any]], standard_profile: str = "") -> str:
+    label = _STANDARD_LABELS.get(standard_profile.lower().strip())
+    if label:
+        badges: List[str] = [label]
+    else:
+        # Fallback: derive from WCAG levels present in criteria
+        levels = {c.get("level", "") for c in criteria if c.get("outcome_status") != "NOT_APPLICABLE"}
+        badges = []
+        if "A" in levels and "AA" in levels:
+            badges = ["WCAG 2.1 AA"]
+        elif "A" in levels:
+            badges = ["WCAG 2.1 A"]
+        if "AAA" in levels:
+            badges.append("WCAG 2.1 AAA")
     if not badges:
         return ""
-    return '<div class="compliance-badges">{}</div>'.format(
-        "".join('<span class="compliance-badge">{}</span>'.format(_escape(b)) for b in badges)
-    )
+    parts = []
+    for b in badges:
+        url = _BADGE_URLS.get(b)
+        if url:
+            parts.append('<a href="{}" class="compliance-badge" target="_blank" rel="noopener noreferrer">{}</a>'.format(url, _escape(b)))
+        else:
+            parts.append('<span class="compliance-badge">{}</span>'.format(_escape(b)))
+    return '<div class="compliance-badges">{}</div>'.format("".join(parts))
+
+
+_DIGEST_EVIDENCE_KEYS = {"source", "severity", "outcome", "message", "target"}
+
+
+def build_digest_json(report: Dict[str, Any]) -> str:
+    """Minimal JSON for LLM analysis — only FAILED criteria with slim evidence (no images)."""
+    failed: List[Dict[str, Any]] = []
+    for c in (report.get("criteria") or []):
+        if c.get("outcome_status") != "FAILED":
+            continue
+        slim_evidence = [
+            {k: v for k, v in e.items() if k in _DIGEST_EVIDENCE_KEYS}
+            for e in (c.get("evidence") or [])
+        ]
+        entry = {
+            "id": c.get("id"),
+            "name": c.get("name"),
+            "level": c.get("level"),
+            "principle": c.get("principle"),
+            "coverage_status": c.get("coverage_status"),
+            "affected_screens": c.get("affected_screens"),
+            "affected_urls": c.get("affected_urls"),
+            "evidence_count": len(slim_evidence),
+            "evidence": slim_evidence,
+        }
+        failed.append(entry)
+
+    payload = {
+        "report_meta": report.get("report_meta", {}),
+        "summary": report.get("summary", {}),
+        "failed": failed,
+    }
+    return json.dumps(payload, indent=2, default=str)
 
 
 def build_report_json(report: Dict[str, Any]) -> str:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import math
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..models import COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW
 
@@ -64,15 +65,18 @@ FOCUS_APPEARANCE_SCRIPT = """
   const focusArea = outlineWidth > 0 ? outerPerimeter * outlineWidth : 0;
 
   // Also check box-shadow as a focus indicator.
-  // Strip the optional "inset" keyword, then collect all px values — use spread (4th) if
-  // present, otherwise blur (3rd), so patterns like "0 0 0 3px", "inset 0 0 5px", and
-  // "0 5px 10px" are all handled.
+  // Strip the optional "inset" keyword, then collect all px values.
+  // Use spread (4th value) directly when present — even if it is 0 — so that
+  // "0 0 10px 0 blue" correctly reports 0 spread rather than falling back to
+  // the blur radius. For 3-value shadows (no spread) use the last value (blur).
+  // Negative values are ignored by the non-negative regex; that is intentional
+  // since negative spreads shrink the shadow inward and don't widen the indicator.
   let boxShadowWidth = 0;
   if (style.boxShadow && style.boxShadow !== 'none') {
     const bsTokens = style.boxShadow.replace(/\\binset\\b/gi, '').match(/(\\d+(?:\\.\\d+)?)px/g);
     if (bsTokens && bsTokens.length >= 1) {
       const vals = bsTokens.map(t => parseFloat(t));
-      boxShadowWidth = vals.length >= 4 ? (vals[3] || vals[2] || 0) : (vals[vals.length - 1] || 0);
+      boxShadowWidth = vals.length >= 4 ? vals[3] : (vals[vals.length - 1] || 0);
     }
   }
 
@@ -108,6 +112,14 @@ FOCUS_APPEARANCE_SCRIPT = """
 """
 
 
+async def _screenshot_focused(page: Any) -> Optional[str]:
+    try:
+        raw = await page.screenshot(full_page=False, type="jpeg", quality=60)
+        return base64.b64encode(raw).decode()
+    except Exception:
+        return None
+
+
 async def run_focus_appearance_evaluator(page: Any) -> List[Dict[str, Any]]:
     samples: List[Dict[str, Any]] = []
     seen: set = set()
@@ -124,6 +136,17 @@ async def run_focus_appearance_evaluator(page: Any) -> List[Dict[str, Any]]:
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
+
+        # Capture a screenshot while the element is still focused, but only for
+        # samples that have a detectable failure — this avoids unnecessary overhead.
+        is_failure = (
+            sample.get("effectiveWidth", 0) == 0
+            or (not sample.get("meetsAreaThreshold") and sample.get("effectiveWidth", 0) > 0)
+            or (not sample.get("meetsContrastThreshold") and sample.get("focusContrast") is not None)
+        )
+        if is_failure:
+            sample["screenshot_b64"] = await _screenshot_focused(page)
+
         samples.append(sample)
 
     if not samples:
@@ -150,6 +173,7 @@ async def run_focus_appearance_evaluator(page: Any) -> List[Dict[str, Any]]:
                 ),
                 "locator": first.get("locator", ""),
                 "element_text": first.get("text", ""),
+                "screenshot_b64": first.get("screenshot_b64"),
                 "metadata": {"samples": samples, "no_indicator": no_indicator},
             }
         )
@@ -170,6 +194,7 @@ async def run_focus_appearance_evaluator(page: Any) -> List[Dict[str, Any]]:
                 ),
                 "locator": first.get("locator", ""),
                 "element_text": first.get("text", ""),
+                "screenshot_b64": first.get("screenshot_b64"),
                 "metadata": {"samples": samples, "area_failures": area_failures},
             }
         )
@@ -189,6 +214,7 @@ async def run_focus_appearance_evaluator(page: Any) -> List[Dict[str, Any]]:
                 ),
                 "locator": first.get("locator", ""),
                 "element_text": first.get("text", ""),
+                "screenshot_b64": first.get("screenshot_b64"),
                 "metadata": {"samples": samples, "contrast_failures": contrast_failures},
             }
         )

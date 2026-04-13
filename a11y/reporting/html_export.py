@@ -99,6 +99,6 @@ def render_html_report(report: Dict[str, Any]) -> str:
         category_breakdown=render_category_breakdown(criteria),
         top_components=render_top_components(criteria),
         outcome_donut=render_outcome_donut(criteria),
-        compliance_badges=render_compliance_badges(criteria),
+        compliance_badges=render_compliance_badges(criteria, meta.get("standard_profile", "")),
         report_json=build_report_json(report),
     )

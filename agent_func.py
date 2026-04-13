@@ -98,7 +98,8 @@ async def create_driver(_run_test_id='1'):
     driver[_run_test_id] = {'playwright': playwright, 'browser': browser, 'context': context, 'page': page}
 
     main_url = os.getenv("MAIN_URL", "https://beta.barkoagent.com")
-    await streaming.astart_stream(driver[_run_test_id], run_id=_run_test_id, fps=0.5, jpeg_quality=70)
+    _stream_stop_after = float(os.getenv("STREAM_STOP_AFTER_S", "600"))
+    await streaming.astart_stream(driver[_run_test_id], run_id=_run_test_id, fps=0.5, jpeg_quality=70, stop_after=_stream_stop_after)
     await page.goto(main_url)
     return "driver created"
 

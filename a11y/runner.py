@@ -50,11 +50,17 @@ from .models import (
     OUTCOME_NOT_TESTED,
     OUTCOME_PASSED,
 )
-from .reporting import render_html_report
+from .reporting import build_digest_json, render_html_report
 from .registry import SECTION_IDS, build_registry
 
 
 LAST_REPORT_BY_RUN: Dict[str, str] = {}
+
+# Per-evaluator timeout (each evaluator in asyncio.gather gets this cap).
+# Axe scan gets its own (larger) cap since it scans the full DOM.
+# Both configurable via env vars for heavy-page deployments.
+_EVALUATOR_TIMEOUT_S = float(os.getenv("A11Y_EVALUATOR_TIMEOUT_S", "60"))
+_AXE_TIMEOUT_S = float(os.getenv("A11Y_AXE_TIMEOUT_S", "90"))
 
 
 def _parse_bool(value: str, default: bool) -> bool:
@@ -346,6 +352,63 @@ def _compact_node_text(node: Dict[str, Any]) -> str:
     return html
 
 
+# Maximum screenshots per axe rule so large violation lists don't bloat reports.
+_AXE_SCREENSHOT_LIMIT_PER_RULE = 3
+
+
+async def _attach_violation_screenshots(
+    page: Any,
+    axe_payload: Dict[str, Any],
+    rule_ids: Optional[set] = None,
+) -> None:
+    """Take element-level screenshots for axe violation nodes and store the
+    base64 JPEG on each node as ``screenshot_b64``.  Only violations are
+    screenshotted (incomplete / passes are left untouched).
+
+    Args:
+        page: Playwright page to screenshot against.
+        axe_payload: The dict returned by ``run_axe_scan``.
+        rule_ids: If given, only screenshot nodes belonging to these rule IDs.
+                  Pass ``None`` to screenshot all violation rules.
+    """
+    if axe_payload.get("status") != "success" or not axe_payload.get("results"):
+        return
+
+    for rule in axe_payload["results"].get("violations", []) or []:
+        rule_id = rule.get("id", "")
+        if rule_ids is not None and rule_id not in rule_ids:
+            continue
+
+        shot_count = 0
+        for node in rule.get("nodes", []) or []:
+            if shot_count >= _AXE_SCREENSHOT_LIMIT_PER_RULE:
+                break
+            target = node.get("target", [])
+            screenshot_b64 = None
+            # Try element-level screenshot first (cleaner view for the engineer).
+            # ``target`` entries can be strings (plain CSS) or lists (shadow-DOM
+            # path).  We only attempt element screenshots for plain CSS strings.
+            css = target[0] if target and isinstance(target[0], str) else None
+            if css:
+                try:
+                    loc = page.locator(css).first
+                    await loc.scroll_into_view_if_needed(timeout=2000)
+                    raw = await loc.screenshot(type="jpeg", quality=70)
+                    screenshot_b64 = base64.b64encode(raw).decode()
+                except Exception:
+                    pass
+            # Fall back to a full-viewport screenshot.
+            if not screenshot_b64:
+                try:
+                    raw = await page.screenshot(full_page=False, type="jpeg", quality=55)
+                    screenshot_b64 = base64.b64encode(raw).decode()
+                except Exception:
+                    pass
+            if screenshot_b64:
+                node["screenshot_b64"] = screenshot_b64
+                shot_count += 1
+
+
 def _register_axe_results(
     criteria_by_id: Dict[str, CriterionResult],
     axe_payload: Dict[str, Any],
@@ -395,6 +458,14 @@ def _register_axe_results(
                         element_text=_compact_node_text(node),
                         report_anchor=anchor,
                     )
+                    if node.get("screenshot_b64"):
+                        location.screenshot_ref = "data:image/jpeg;base64,{}".format(node["screenshot_b64"])
+                    # Extract per-node check data (e.g. contrast ratio, colours, reason)
+                    node_check_data: Dict[str, Any] = {}
+                    for _chk in (node.get("any") or []) + (node.get("all") or []):
+                        if _chk.get("id") == rule.get("id"):
+                            node_check_data = _chk.get("data") or {}
+                            break
                     evidence = EvidenceItem(
                         source="axe:{}".format(rule.get("id", "unknown-rule")),
                         severity=rule.get("impact") or "unknown",
@@ -406,6 +477,7 @@ def _register_axe_results(
                             "help": rule.get("help"),
                             "helpUrl": rule.get("helpUrl"),
                             "tags": rule.get("tags", []),
+                            "nodeCheckData": node_check_data,
                         },
                     )
                     _apply_evidence(
@@ -520,6 +592,12 @@ def _persist_json_report(report: AccessibilityReport) -> str:
 def _persist_html_report(report: AccessibilityReport) -> str:
     path = _artifact_path(report.report_meta["report_id"], "html")
     path.write_text(render_html_report(report.to_dict()), encoding="utf-8")
+    return path.name
+
+
+def _persist_digest_report(report: AccessibilityReport) -> str:
+    path = _artifact_path(report.report_meta["report_id"] + "_digest", "json")
+    path.write_text(build_digest_json(report.to_dict()), encoding="utf-8")
     return path.name
 
 
@@ -786,21 +864,21 @@ async def append_accessibility_audit_checkpoint(
     )
     try:
         _evaluator_tasks = await asyncio.gather(
-            run_keyboard_smoke_evaluator(eval_page),
-            run_focus_visibility_evaluator(eval_page),
-            run_focus_appearance_evaluator(eval_page),
-            run_form_labeling_evaluator(eval_page),
-            run_hover_content_evaluator(eval_page),
-            run_structure_evaluator(eval_page),
-            run_live_region_evaluator(eval_page),
-            run_viewport_reflow_evaluator(eval_page, session["viewport_profile"]),
-            run_text_resize_evaluator(eval_page),
-            run_timing_evaluator(eval_page),
-            run_pointer_target_evaluator(eval_page),
-            run_orientation_evaluator(eval_page),
-            run_motion_preference_evaluator(eval_page),
-            run_media_alternatives_evaluator(eval_page),
-            run_context_change_evaluator(eval_page),
+            asyncio.wait_for(run_keyboard_smoke_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_focus_visibility_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_focus_appearance_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_form_labeling_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_hover_content_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_structure_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_live_region_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_viewport_reflow_evaluator(eval_page, session["viewport_profile"]), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_text_resize_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_timing_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_pointer_target_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_orientation_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_motion_preference_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_media_alternatives_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
+            asyncio.wait_for(run_context_change_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
             return_exceptions=True,
         )
         for _eval_name, _eval_result in zip(_evaluator_names, _evaluator_tasks):
@@ -822,22 +900,30 @@ async def append_accessibility_audit_checkpoint(
                     frame_name=frame_name,
                 )
             )
-        axe_payload = await run_axe_scan(
-            page=eval_page,
-            standard_profile=session["standard_profile"],
-            scope_selector=session["scope_selector"],
-            include_best_practices=session["include_best_practices"],
-            include_experimental=session["include_experimental"],
-            full_scan=session["axe_full_scan"],
-            custom_tags=session["axe_custom_tags"],
-            exclude_tags=session["axe_exclude_tags"],
-            enabled_rules=session["axe_enabled_rules"],
-            disabled_rules=session["axe_disabled_rules"],
-            include_iframes=session["axe_include_iframes"],
-            include_selectors=session["axe_include_selectors"],
-            include_ancestry=session["axe_include_ancestry"],
-            result_types=session["axe_result_types"],
-            reporter=session["axe_reporter"],
+        axe_payload = await asyncio.wait_for(
+            run_axe_scan(
+                page=eval_page,
+                standard_profile=session["standard_profile"],
+                scope_selector=session["scope_selector"],
+                include_best_practices=session["include_best_practices"],
+                include_experimental=session["include_experimental"],
+                full_scan=session["axe_full_scan"],
+                custom_tags=session["axe_custom_tags"],
+                exclude_tags=session["axe_exclude_tags"],
+                enabled_rules=session["axe_enabled_rules"],
+                disabled_rules=session["axe_disabled_rules"],
+                include_iframes=session["axe_include_iframes"],
+                include_selectors=session["axe_include_selectors"],
+                include_ancestry=session["axe_include_ancestry"],
+                result_types=session["axe_result_types"],
+                reporter=session["axe_reporter"],
+            ),
+            timeout=_AXE_TIMEOUT_S,
+        )
+        await _attach_violation_screenshots(
+            eval_page,
+            axe_payload,
+            rule_ids=None,
         )
     except Exception as exc:
         session["execution_notes"].append(
@@ -966,6 +1052,8 @@ async def finalize_accessibility_audit_session(session: Dict[str, Any]) -> str:
     report.artifacts["json"] = json_artifact_name
     html_artifact_name = _persist_html_report(report)
     report.artifacts["html"] = html_artifact_name
+    digest_artifact_name = _persist_digest_report(report)
+    report.artifacts["digest"] = digest_artifact_name
     _persist_json_report(report)
     LAST_REPORT_BY_RUN[session["_run_test_id"]] = json_artifact_name
 

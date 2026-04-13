@@ -110,6 +110,58 @@ ZOOM_OVERFLOW_SCRIPT = """
 """
 
 
+def _build_spacing_failure_message(overflowing: List[Dict[str, Any]], body_overflow: bool) -> str:
+    if not overflowing and body_overflow:
+        return (
+            "The page scrolls horizontally when text spacing is increased. "
+            "Look for elements with a fixed width that prevents text from wrapping — "
+            "replace fixed widths with min-width, or remove overflow:hidden so text "
+            "can expand."
+        )
+
+    first = overflowing[0]
+    text = (first.get("text") or "").strip()
+    locator = first.get("locator", "")
+    overflow_px = first.get("overflow", 0)
+
+    name = '"{}"'.format(text[:60]) if text else locator or "an element"
+    loc_hint = " ({})".format(locator) if locator and text else ""
+    overflow_hint = " by {}px".format(overflow_px) if overflow_px else ""
+
+    others = ""
+    if len(overflowing) > 1:
+        count = len(overflowing) - 1
+        others = " {} other element{} also overflow.".format(count, "s" if count != 1 else "")
+
+    return (
+        "The element {name}{loc_hint} overflows its container{overflow_hint} when text "
+        "spacing is increased (letter-spacing 0.12em, word-spacing 0.16em, line-height 1.5). "
+        "Its container likely has a fixed width or overflow:hidden. "
+        "Fix: remove or relax the fixed width/max-width so the element can grow, "
+        "or allow text to wrap instead of being clipped.{others}"
+    ).format(name=name, loc_hint=loc_hint, overflow_hint=overflow_hint, others=others)
+
+
+async def _screenshot_element(page: Any, locator_str: str) -> str:
+    """Screenshot the specific element; fall back to viewport with element scrolled into view."""
+    try:
+        loc = page.locator(locator_str).first
+        await loc.scroll_into_view_if_needed(timeout=2000)
+        data = await loc.screenshot(type="jpeg", quality=70)
+        return base64.b64encode(data).decode()
+    except Exception:
+        pass
+    try:
+        await page.evaluate(
+            "(sel) => { const el = document.querySelector(sel); if (el) el.scrollIntoView({block: 'center'}); }",
+            locator_str,
+        )
+        data = await page.screenshot(full_page=False, type="jpeg", quality=55)
+        return base64.b64encode(data).decode()
+    except Exception:
+        return ""
+
+
 async def run_text_resize_evaluator(page: Any) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
 
@@ -119,12 +171,18 @@ async def run_text_resize_evaluator(page: Any) -> List[Dict[str, Any]]:
         await page.evaluate(INJECT_SPACING_SCRIPT, TEXT_SPACING_CSS)
         await asyncio.sleep(0.2)
         spacing_data = await page.evaluate(OVERFLOW_SCAN_SCRIPT)
-        try:
-            spacing_screenshot_b64 = base64.b64encode(
-                await page.screenshot(full_page=False, type="jpeg", quality=55)
-            ).decode()
-        except Exception:
-            pass
+
+        _overflowing_early = spacing_data.get("overflowing", [])
+        if _overflowing_early:
+            spacing_screenshot_b64 = await _screenshot_element(page, _overflowing_early[0]["locator"])
+        if not spacing_screenshot_b64:
+            try:
+                spacing_screenshot_b64 = base64.b64encode(
+                    await page.screenshot(full_page=False, type="jpeg", quality=55)
+                ).decode()
+            except Exception:
+                pass
+
         await page.evaluate(REMOVE_SPACING_SCRIPT)
     except Exception:
         spacing_data = {"overflowing": [], "bodyOverflow": False}
@@ -141,13 +199,7 @@ async def run_text_resize_evaluator(page: Any) -> List[Dict[str, Any]]:
                 "coverage_status": COVERAGE_AUTOMATED,
                 "outcome": OUTCOME_FAILED,
                 "severity": "serious",
-                "message": (
-                    "Applying WCAG 1.4.12 text-spacing overrides (line-height 1.5, "
-                    "letter-spacing 0.12em, word-spacing 0.16em, paragraph spacing 2em) "
-                    "caused {} element(s) to overflow horizontally.".format(
-                        len(overflowing) if overflowing else "body-level"
-                    )
-                ),
+                "message": _build_spacing_failure_message(overflowing, body_overflow),
                 "locator": first.get("locator", "body"),
                 "element_text": first.get("text", ""),
                 "screenshot_b64": spacing_screenshot_b64,

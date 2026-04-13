@@ -138,7 +138,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .failed, .error {{
       background: rgba(180,35,24,.10); color: var(--danger); border-color: rgba(180,35,24,.18);
     }}
-    .needs-review, .semi-automated {{
+    .needs-review {{
+      background: rgba(105,65,198,.08); color: var(--manual); border-color: rgba(105,65,198,.18);
+    }}
+    .semi-automated {{
       background: rgba(181,71,8,.10); color: var(--warn); border-color: rgba(181,71,8,.18);
     }}
     .manual-required {{
@@ -163,6 +166,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border: 1px solid rgba(15,118,110,.3);
       background: rgba(15,118,110,.08);
       color: var(--accent);
+      text-decoration: none;
+    }}
+    .compliance-badge:hover {{
+      background: rgba(15,118,110,.16);
     }}
 
     /* ── Export bar ───────────────────────────────────────────────────────── */
@@ -263,7 +270,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       white-space: nowrap;
     }}
     .gain-failed {{ background: rgba(176,0,32,.1);  color: var(--c-critical); }}
-    .gain-review {{ background: rgba(253,126,20,.1); color: #d97706; }}
+    .gain-review {{ background: rgba(105,65,198,.08); color: var(--manual); }}
     .standards-note {{ font-size: .78rem; margin: 10px 0 0; }}
 
     /* ── WCAG Pillar grid ─────────────────────────────────────────────────── */
@@ -353,21 +360,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .cat-pass   {{ color: var(--c-pass); }}
 
     /* ── Top components ───────────────────────────────────────────────────── */
-    .comp-search-wrap {{ margin-bottom: 12px; }}
-    .comp-search {{
-      width: 100%;
-      padding: 8px 14px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      font-size: .88rem;
-      background: #faf7f1;
-      color: var(--ink);
-    }}
-    .comp-search:focus {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
     .components-list {{ display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }}
     .component-row {{
       display: grid;
-      grid-template-columns: 1fr 80px 36px;
+      grid-template-columns: 1fr 80px 36px 36px;
       align-items: center;
       gap: 10px;
     }}
@@ -380,9 +376,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       text-overflow: ellipsis;
       white-space: nowrap;
     }}
-    .comp-bar {{ height: 6px; background: #e9ecef; border-radius: 3px; overflow: hidden; }}
-    .comp-bar-fill {{ height: 100%; background: var(--c-critical); border-radius: 3px; }}
-    .comp-count {{ font-size: .76rem; font-weight: 700; color: var(--c-critical); text-align: right; }}
+    .comp-bar {{ display: flex; height: 6px; background: #e9ecef; border-radius: 3px; overflow: hidden; }}
+    .comp-bar-fail   {{ height: 100%; background: var(--c-critical); }}
+    .comp-bar-review {{ height: 100%; background: #d97706; }}
+    .comp-count-fail   {{ font-size: .76rem; font-weight: 700; color: var(--c-critical); text-align: right; }}
+    .comp-count-review {{ font-size: .76rem; font-weight: 700; color: #d97706;           text-align: right; }}
+    .comp-count-zero   {{ opacity: .35; }}
 
     /* ── Outcome with donut ───────────────────────────────────────────────── */
     .outcome-with-chart {{
@@ -661,6 +660,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       .criterion-body {{ grid-template-columns: 1fr; }}
       .criterion-head {{ flex-direction: column; }}
     }}
+    @media (max-width: 640px) {{
+      .page {{ padding: 16px 12px 40px; }}
+      .hero {{ padding: 18px 16px; }}
+      .panel, .criterion-panel {{ padding: 16px; }}
+      .timeline-head {{ flex-wrap: wrap; }}
+      .filter-group-label {{ display: none; }}
+      .legend-desc {{ display: none; }}
+      table {{ display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+      .flow-arrow {{ padding: 0 4px; font-size: 1.1rem; }}
+    }}
+    @media (max-width: 500px) {{
+      .component-row {{ grid-template-columns: 1fr 36px 36px; }}
+      .comp-bar {{ display: none; }}
+      .health-layout {{ justify-items: start; }}
+      .health-stat-grid {{ grid-template-columns: 1fr 1fr; }}
+    }}
 
     /* ── Action items ─────────────────────────────────────────────────────── */
     .action-item {{
@@ -675,8 +690,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-left: 3px solid var(--danger);
     }}
     .action-review {{
-      background: rgba(181,71,8,.06);
-      border-left: 3px solid var(--warn);
+      background: rgba(105,65,198,.05);
+      border-left: 3px solid var(--manual);
     }}
     .outcome-summary-text {{
       color: var(--muted);
@@ -717,6 +732,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .coverage-details-inner p {{ margin: 4px 0; }}
     .coverage-details-inner ul {{ margin: 6px 0; padding-left: 18px; }}
 
+    /* ── Automation limit callout ────────────────────────────────────────── */
+    .automation-limit-callout {{ margin: 0 0 14px; }}
+    .automation-limit-callout > summary {{
+      font-size: .82rem; color: var(--muted);
+      cursor: pointer; user-select: none;
+      font-weight: 600;
+    }}
+    .automation-limit-body {{
+      margin-top: 8px; padding: 12px 14px;
+      background: #eef3fb; border-radius: 8px;
+      border-left: 3px solid #4a7cc9;
+      font-size: .86rem;
+    }}
+    .automation-limit-body p {{ margin: 6px 0; }}
+    .automation-limit-body ul {{ margin: 6px 0; padding-left: 18px; }}
+    .automation-limit-body li {{ margin-bottom: 4px; line-height: 1.5; }}
+
     /* ── Status legend ────────────────────────────────────────────────────── */
     .status-legend {{
       display: flex; flex-wrap: wrap; gap: 14px 20px;
@@ -730,14 +762,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     /* ── Print ────────────────────────────────────────────────────────────── */
     @media print {{
       .filter-toolbar, .export-bar,
-      .comp-search-wrap,
       .not-tested-toggle-bar {{ display: none !important; }}
       .criterion-panel-not-tested {{ display: block !important; }}
       .page {{ max-width: 100%; padding: 12px; box-shadow: none; }}
-      .hero, .panel, .criterion-panel {{ box-shadow: none; break-inside: avoid; }}
+      .hero, .panel, .criterion-panel {{ box-shadow: none; break-inside: avoid; padding: 20px; }}
       .two-col {{ grid-template-columns: 1fr; }}
-      .health-layout {{ grid-template-columns: 1fr; }}
+      .health-layout {{ grid-template-columns: 1fr; justify-items: start; }}
       .pillar-grid {{ grid-template-columns: repeat(2, 1fr); }}
+      table {{ display: table; overflow-x: visible; }}
+      .legend-desc {{ display: inline; }}
     }}
   </style>
 </head>
@@ -782,11 +815,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </section>
       <section class="panel">
         <h2 style="margin-top:0">Top Affected Components</h2>
-        <p class="muted" style="margin-top:0">CSS selectors with the highest failure frequency across all evidence.</p>
-        <div class="comp-search-wrap">
-          <input class="comp-search" type="search" placeholder="Filter selectors&#8230;"
-            oninput="searchComponents(this.value)" aria-label="Filter component selectors">
-        </div>
+        <p class="muted" style="margin-top:0">CSS selectors ranked by total issue count.
+          <span style="color:var(--c-critical);font-weight:600">&#9632; Failed</span> &nbsp;
+          <span style="color:#d97706;font-weight:600">&#9632; Needs review</span>
+        </p>
         {top_components}
       </section>
     </div>
@@ -859,7 +891,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <p class="muted">Sorted by priority &mdash; failures first. Use filters to narrow results. Click &ldquo;Coverage details&rdquo; on any criterion for sources and affected screens.</p>
       <div class="status-legend" role="note" aria-label="Status legend">
         <div class="legend-item"><span class="badge failed">Failed</span><span class="legend-desc">Automated violation confirmed &mdash; fix required</span></div>
-        <div class="legend-item"><span class="badge needs-review">Needs Review</span><span class="legend-desc">Potential issue &mdash; confirm manually</span></div>
+        <div class="legend-item"><span class="badge needs-review">Needs Review</span><span class="legend-desc">Open question &mdash; automation flagged but could not confirm; human review required</span></div>
         <div class="legend-item"><span class="badge passed">Passed</span><span class="legend-desc">Tested &mdash; no violations found</span></div>
         <div class="legend-item"><span class="badge not-tested">Not Tested</span><span class="legend-desc">No evidence collected this run</span></div>
         <div class="legend-item"><span class="badge not-applicable">N/A</span><span class="legend-desc">Does not apply to this flow</span></div>
@@ -943,15 +975,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         btn.classList.add('filter-active');
       }}
       _applyFilters();
-    }}
-
-    /* ── Component search ────────────────────────────────────────────────── */
-    function searchComponents(q) {{
-      var lq = q.toLowerCase();
-      document.querySelectorAll('.component-row').forEach(function(row) {{
-        var sel = (row.getAttribute('data-selector') || '').toLowerCase();
-        row.style.display = sel.indexOf(lq) !== -1 ? '' : 'none';
-      }});
     }}
 
     /* ── JSON download ───────────────────────────────────────────────────── */
