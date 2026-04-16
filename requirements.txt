@@ -7,3 +7,4 @@ aiohttp
 python-dotenv
 pytest-playwright
 git+https://github.com/BarkoAgent/ba-sdk.git
+axe-playwright-python; python_version >= "3.10"
