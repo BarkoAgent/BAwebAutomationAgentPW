@@ -7,7 +7,9 @@ import logging
 
 import ba_ws_sdk.streaming as streaming
 import ba_ws_sdk.file_system as file_system
+from dotenv import load_dotenv
 from playwright.async_api import async_playwright
+load_dotenv()
 
 DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "10"))  # seconds; Playwright expects ms
 
