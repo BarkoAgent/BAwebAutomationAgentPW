@@ -9,6 +9,8 @@ import ba_ws_sdk.streaming as streaming
 import ba_ws_sdk.file_system as file_system
 from playwright.async_api import async_playwright
 
+DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "10"))  # seconds; Playwright expects ms
+
 test_variables = {}
 driver: dict[str, object] = {}
 run_test_id = ""
@@ -19,7 +21,7 @@ def clean_html(html_content):
         html_content = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html_content, flags=re.DOTALL)
     return html_content
 
-async def stop_all_drivers():
+async def stop_all_drivers(**kwargs):
     global driver
     for run_id, d in list(driver.items()):
         try:
@@ -166,7 +168,7 @@ async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     if use_vars == 'true' and _run_test_id in test_variables:
         value = test_variables[_run_test_id].get(value, value)
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
     await page.fill(locator, value)
     return "sent keys"
 
@@ -176,7 +178,7 @@ async def exists(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=15000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
     return "exists"
 
 async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false') -> str:
@@ -188,7 +190,7 @@ async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false')
     if use_vars == 'true' and _run_test_id in test_variables:
         text = test_variables[_run_test_id].get(text, text)
     locator = f"text={text}"
-    await page.wait_for_selector(locator, timeout=15000)
+    await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
     return "exists (text)"
 
 async def does_not_exist(locator: str, _run_test_id='1') -> str:
@@ -197,7 +199,7 @@ async def does_not_exist(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state='detached', timeout=15000)
+    await page.wait_for_selector(locator, state='detached', timeout=DEFAULT_TIMEOUT * 1000)
     return "doesn't exists"
 
 async def scroll_to_element(locator: str, _run_test_id='1') -> str:
@@ -206,7 +208,7 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=150000)
+    await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
     await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
     return "scrolled"
 
@@ -226,7 +228,7 @@ async def click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=150000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
     await page.click(locator)
     return "clicked successfully on the element"
 
@@ -236,7 +238,7 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=150000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
     await page.dblclick(locator)
     return "double clicked"
 
@@ -246,7 +248,7 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=150000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
     await page.click(locator, button='right')
     return "right clicked"
 
@@ -261,7 +263,7 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
 
     if by == "value":
         await page.select_option(locator, value=option)
