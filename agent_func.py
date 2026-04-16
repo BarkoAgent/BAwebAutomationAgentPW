@@ -168,7 +168,7 @@ async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     if use_vars == 'true' and _run_test_id in test_variables:
         value = test_variables[_run_test_id].get(value, value)
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
     await page.fill(locator, value)
     return "sent keys"
 
@@ -178,7 +178,7 @@ async def exists(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=15000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
     return "exists"
 
 async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false') -> str:
@@ -190,7 +190,7 @@ async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false')
     if use_vars == 'true' and _run_test_id in test_variables:
         text = test_variables[_run_test_id].get(text, text)
     locator = f"text={text}"
-    await page.wait_for_selector(locator, timeout=15000)
+    await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
     return "exists (text)"
 
 async def does_not_exist(locator: str, _run_test_id='1') -> str:
@@ -199,7 +199,7 @@ async def does_not_exist(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state='detached', timeout=15000)
+    await page.wait_for_selector(locator, state='detached', timeout=DEFAULT_TIMEOUT * 1000)
     return "doesn't exists"
 
 async def scroll_to_element(locator: str, _run_test_id='1') -> str:
@@ -263,7 +263,7 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=10000)
+    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
 
     if by == "value":
         await page.select_option(locator, value=option)
