@@ -8,6 +8,7 @@ import logging
 import ba_ws_sdk.streaming as streaming
 import ba_ws_sdk.file_system as file_system
 from dotenv import load_dotenv
+import ba_ws_sdk.variables as variables
 from playwright.async_api import async_playwright
 load_dotenv()
 
@@ -101,6 +102,7 @@ async def create_driver(_run_test_id='1'):
 
     driver[_run_test_id] = {'playwright': playwright, 'browser': browser, 'context': context, 'page': page}
 
+    variables.init_run(_run_test_id)
     main_url = os.getenv("MAIN_URL", "https://beta.barkoagent.com")
     _stream_stop_after_raw = os.getenv("STREAM_STOP_AFTER_S", "600")
     try:
@@ -123,8 +125,42 @@ async def stop_driver(_run_test_id='1'):
         await driver[_run_test_id]['playwright'].stop()
         streaming.stop_stream(_run_test_id)
         file_system.clear_downloads(_run_test_id)
+        variables.export_run(_run_test_id)
+        variables.cleanup_run(_run_test_id)
         return "success"
     return "no driver"
+
+
+async def set_variable(name: str, value: str, _run_test_id: str = "1") -> str:
+    """
+    Store a named variable for this test run that can be retrieved later
+    or passed to dependent tests via return_variable().
+    """
+    return variables.set_variable(name, value, _run_test_id)
+
+
+async def return_variable(name: str, _run_test_id: str = "1") -> str:
+    """
+    Retrieve a named variable set earlier in this run or imported from
+    a dependency test.
+    """
+    return variables.return_variable(name, _run_test_id)
+
+
+async def get_exported_variables(_run_test_id: str = "1") -> dict:
+    """
+    Return all variables set during this run. Called by the backend after
+    test completion to capture variables for dependent tests.
+    """
+    return variables.get_exported_variables(_run_test_id)
+
+
+async def import_variables(variables_dict: dict, _run_test_id: str = "1") -> str:
+    """
+    Pre-populate variables exported by a dependency test.
+    Called as a preamble before the dependent test's own steps.
+    """
+    return variables.import_variables(variables_dict, _run_test_id)
 
 async def maximize_window(_run_test_id='1'):
     """
