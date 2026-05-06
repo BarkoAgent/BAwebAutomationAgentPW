@@ -6,11 +6,7 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_RESULT_TYPES = ["violations", "passes", "incomplete", "inapplicable"]
 
-STANDARD_TAGS = {
-    "wcag22aa": ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"],
-    "wcag22aaa": ["wcag2a", "wcag2aa", "wcag2aaa", "wcag21a", "wcag21aa", "wcag21aaa", "wcag22aa", "wcag22aaa"],
-    "wcag22a": ["wcag2a", "wcag21a", "wcag22a"],
-}
+WCAG22AA_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]
 
 
 def _parse_csv(value: Optional[str]) -> List[str]:
@@ -45,7 +41,6 @@ def _load_axe_class():
 
 async def run_axe_scan(
     page: Any,
-    standard_profile: str = "wcag22aa",
     scope_selector: str = "",
     include_best_practices: bool = True,
     include_experimental: bool = False,
@@ -70,7 +65,7 @@ async def run_axe_scan(
 
     tags = _parse_csv(custom_tags)
     if not tags and not full_scan:
-        tags = list(STANDARD_TAGS.get(standard_profile.lower(), STANDARD_TAGS["wcag22aa"]))
+        tags = list(WCAG22AA_TAGS)
         if include_best_practices:
             tags.append("best-practice")
         if include_experimental:

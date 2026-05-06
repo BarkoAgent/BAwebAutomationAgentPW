@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Dict, List, Optional
 
 from ..models import COVERAGE_AUTOMATED, COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW, OUTCOME_PASSED
+
+logger = logging.getLogger(__name__)
 
 
 # WCAG 1.3.4: Orientation
@@ -63,6 +66,7 @@ async def run_orientation_evaluator(page: Any) -> List[Dict[str, Any]]:
     try:
         original_viewport = page.viewport_size or {"width": 1280, "height": 800}
     except Exception:
+        logger.warning("orientation: viewport_size lookup failed; using default 1280x800", exc_info=True)
         original_viewport = {"width": 1280, "height": 800}
 
     orig_w = original_viewport.get("width", 1280)
@@ -72,6 +76,7 @@ async def run_orientation_evaluator(page: Any) -> List[Dict[str, Any]]:
     try:
         locks = await page.evaluate(ORIENTATION_LOCK_SCRIPT)
     except Exception:
+        logger.warning("orientation: CSS lock detection script failed; treating as no locks found", exc_info=True)
         locks = []
 
     if locks:
@@ -101,6 +106,7 @@ async def run_orientation_evaluator(page: Any) -> List[Dict[str, Any]]:
         await asyncio.sleep(0.3)
         portrait_data = await page.evaluate(OVERFLOW_CHECK_SCRIPT)
     except Exception:
+        logger.warning("orientation: portrait viewport probe failed", exc_info=True)
         portrait_data = None
 
     # --- Test landscape viewport (812×375) ---
@@ -109,6 +115,7 @@ async def run_orientation_evaluator(page: Any) -> List[Dict[str, Any]]:
         await asyncio.sleep(0.3)
         landscape_data = await page.evaluate(OVERFLOW_CHECK_SCRIPT)
     except Exception:
+        logger.warning("orientation: landscape viewport probe failed", exc_info=True)
         landscape_data = None
 
     # Restore original viewport
@@ -116,7 +123,7 @@ async def run_orientation_evaluator(page: Any) -> List[Dict[str, Any]]:
         await page.set_viewport_size({"width": orig_w, "height": orig_h})
         await asyncio.sleep(0.2)
     except Exception:
-        pass
+        logger.warning("orientation: viewport restore to %dx%d failed", orig_w, orig_h, exc_info=True)
 
     portrait_overflow = portrait_data.get("horizontalOverflow", False) if portrait_data else False
     landscape_overflow = landscape_data.get("horizontalOverflow", False) if landscape_data else False

@@ -18,8 +18,24 @@ ACTIVE_ELEMENT_SCRIPT = """
   function cssPath(el) {
     if (!el || el.nodeType !== 1) return '';
     if (el.id) return '#' + el.id;
+    const tag = el.tagName.toLowerCase();
+    const ariaLabel = (el.getAttribute && el.getAttribute('aria-label')) || '';
+    if (ariaLabel) return tag + '[aria-label="' + ariaLabel.slice(0, 40).replace(/"/g, '\\"') + '"]';
+    const name = (el.getAttribute && el.getAttribute('name')) || '';
+    if (name) return tag + '[name="' + name + '"]';
+    // Skip class names for SVG / SVG-child elements — Tailwind/util classes are style noise.
+    const isSvgish = tag === 'svg' || tag === 'path' || tag === 'g' || tag === 'use' ||
+      (el.ownerSVGElement != null);
+    if (isSvgish) {
+      const parent = el.parentElement;
+      if (parent) {
+        const idx = Array.prototype.indexOf.call(parent.children, el);
+        return tag + ':nth-child(' + (idx + 1) + ')';
+      }
+      return tag;
+    }
     const classes = Array.from(el.classList || []).slice(0, 3).join('.');
-    return el.tagName.toLowerCase() + (classes ? '.' + classes : '');
+    return tag + (classes ? '.' + classes : '');
   }
   const el = document.activeElement;
   if (!el) return null;
@@ -40,8 +56,24 @@ ACTIVATION_MONITOR_SCRIPT = """
   function cssPath(el) {
     if (!el || el.nodeType !== 1) return '';
     if (el.id) return '#' + el.id;
+    const tag = el.tagName.toLowerCase();
+    const ariaLabel = (el.getAttribute && el.getAttribute('aria-label')) || '';
+    if (ariaLabel) return tag + '[aria-label="' + ariaLabel.slice(0, 40).replace(/"/g, '\\"') + '"]';
+    const name = (el.getAttribute && el.getAttribute('name')) || '';
+    if (name) return tag + '[name="' + name + '"]';
+    // Skip class names for SVG / SVG-child elements — Tailwind/util classes are style noise.
+    const isSvgish = tag === 'svg' || tag === 'path' || tag === 'g' || tag === 'use' ||
+      (el.ownerSVGElement != null);
+    if (isSvgish) {
+      const parent = el.parentElement;
+      if (parent) {
+        const idx = Array.prototype.indexOf.call(parent.children, el);
+        return tag + ':nth-child(' + (idx + 1) + ')';
+      }
+      return tag;
+    }
     const classes = Array.from(el.classList || []).slice(0, 3).join('.');
-    return el.tagName.toLowerCase() + (classes ? '.' + classes : '');
+    return tag + (classes ? '.' + classes : '');
   }
   const el = document.activeElement;
   if (!el) return null;
@@ -73,8 +105,24 @@ ACTIVATION_RESULT_SCRIPT = """
   function cssPath(el) {
     if (!el || el.nodeType !== 1) return '';
     if (el.id) return '#' + el.id;
+    const tag = el.tagName.toLowerCase();
+    const ariaLabel = (el.getAttribute && el.getAttribute('aria-label')) || '';
+    if (ariaLabel) return tag + '[aria-label="' + ariaLabel.slice(0, 40).replace(/"/g, '\\"') + '"]';
+    const name = (el.getAttribute && el.getAttribute('name')) || '';
+    if (name) return tag + '[name="' + name + '"]';
+    // Skip class names for SVG / SVG-child elements — Tailwind/util classes are style noise.
+    const isSvgish = tag === 'svg' || tag === 'path' || tag === 'g' || tag === 'use' ||
+      (el.ownerSVGElement != null);
+    if (isSvgish) {
+      const parent = el.parentElement;
+      if (parent) {
+        const idx = Array.prototype.indexOf.call(parent.children, el);
+        return tag + ':nth-child(' + (idx + 1) + ')';
+      }
+      return tag;
+    }
     const classes = Array.from(el.classList || []).slice(0, 3).join('.');
-    return el.tagName.toLowerCase() + (classes ? '.' + classes : '');
+    return tag + (classes ? '.' + classes : '');
   }
   const tracker = window.__a11yKeyboardProbe || {};
   const el = document.activeElement;
@@ -102,13 +150,25 @@ selector => Array.from(document.querySelectorAll(selector))
       rect.width > 0 &&
       rect.height > 0;
   })
-  .slice(0, 12)
+  .slice(0, 25)
   .map(el => {
-    const classes = Array.from(el.classList || []).slice(0, 3).join('.');
+    const tag = el.tagName.toLowerCase();
+    const ariaLabel = (el.getAttribute('aria-label') || '');
+    const name = (el.getAttribute('name') || '');
+    const isSvgish = tag === 'svg' || el.ownerSVGElement != null;
+    let locator;
+    if (el.id) locator = '#' + el.id;
+    else if (ariaLabel) locator = tag + '[aria-label="' + ariaLabel.slice(0, 40).replace(/"/g, '\\"') + '"]';
+    else if (name) locator = tag + '[name="' + name + '"]';
+    else if (isSvgish) locator = tag;
+    else {
+      const classes = Array.from(el.classList || []).slice(0, 3).join('.');
+      locator = tag + (classes ? '.' + classes : '');
+    }
     return {
-      locator: el.id ? '#' + el.id : el.tagName.toLowerCase() + (classes ? '.' + classes : ''),
+      locator: locator,
       text: (el.innerText || el.textContent || '').trim().slice(0, 120),
-      tag: el.tagName.toLowerCase(),
+      tag: tag,
     };
   })
 """
@@ -150,7 +210,9 @@ async def run_keyboard_smoke_evaluator(page: Any) -> List[Dict[str, Any]]:
     lost_focus = False
     lost_focus_reason = ""   # "null_active" | "body" | "html"
     lost_focus_at_index = -1
-    tab_attempts = min(max(len(interactives) + 1, 4), 12)
+    # Larger budget when many interactive elements visible — small Tab caps cause
+    # false-trap reports on pages with deep menus / hamburger flyouts.
+    tab_attempts = min(max(len(interactives) + 2, 8), 25)
 
     for i in range(tab_attempts):
         await page.keyboard.press("Tab")
@@ -287,21 +349,26 @@ async def run_keyboard_smoke_evaluator(page: Any) -> List[Dict[str, Any]]:
         outcome_211 = OUTCOME_FAILED
         severity_211 = "serious"
         message_211 = "Keyboard smoke focused a safe interactive element but Enter and Space did not produce an observable activation signal."
-    elif reachability_ratio >= 0.5:
+    elif reachability_ratio >= 0.5 and activation_result:
         outcome_211 = OUTCOME_PASSED
         severity_211 = ""
-        if activation_result:
-            message_211 = "Keyboard smoke reached {} of {} interactive targets; activation confirmed.".format(
+        message_211 = "Keyboard reached {} of {} sampled interactive targets and activation was confirmed via Enter/Space.".format(
+            len(unique_locators), len(interactives)
+        )
+    elif reachability_ratio >= 0.5:
+        # Reached enough targets but no safe probe element — partial automation only.
+        outcome_211 = OUTCOME_NEEDS_REVIEW
+        severity_211 = "moderate"
+        message_211 = (
+            "Keyboard reached {} of {} sampled interactive targets but no safe element was available to "
+            "probe Enter/Space activation — pass cannot be confirmed automatically; manual review required.".format(
                 len(unique_locators), len(interactives)
             )
-        else:
-            message_211 = "Keyboard smoke reached {} of {} interactive targets; activation not tested (no safe probe element).".format(
-                len(unique_locators), len(interactives)
-            )
+        )
     else:
         outcome_211 = OUTCOME_NEEDS_REVIEW
         severity_211 = "moderate"
-        message_211 = "Keyboard smoke reached {} of {} targets; coverage insufficient for automated pass — manual review required.".format(
+        message_211 = "Keyboard reached only {} of {} sampled interactive targets within the Tab budget — coverage insufficient for automated pass; manual review required.".format(
             len(unique_locators), len(interactives)
         )
 

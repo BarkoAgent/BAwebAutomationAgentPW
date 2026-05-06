@@ -277,6 +277,7 @@ async def _poll_for_condition(
         try:
             result = await page.evaluate(script, args) if args is not None else await page.evaluate(script)
         except Exception:
+            logger.warning("hover_content: poll script eval failed; aborting wait", exc_info=True)
             break
         if condition_fn(result):
             return result
@@ -311,6 +312,7 @@ async def _probe_hoverability(
         try:
             await page.mouse.move(x, y)
         except Exception:
+            logger.warning("hover_content: hoverability mouse.move failed at step %d", i, exc_info=True)
             return False
         await asyncio.sleep(0.03)
 
@@ -320,7 +322,7 @@ async def _probe_hoverability(
                 if not still_visible:
                     return False
             except Exception:
-                pass  # evaluation hiccup — don't abort the test on a single failure
+                logger.debug("hover_content: probe-visible check hiccup at step %d; continuing", i, exc_info=True)
 
     return True
 
@@ -330,6 +332,7 @@ async def _take_screenshot(page: Any) -> str:
         raw = await page.screenshot(full_page=False, type="jpeg", quality=55)
         return base64.b64encode(raw).decode()
     except Exception:
+        logger.warning("hover_content: viewport screenshot failed", exc_info=True)
         return ""
 
 

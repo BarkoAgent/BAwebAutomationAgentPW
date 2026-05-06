@@ -101,7 +101,10 @@ async def run_live_region_evaluator(page: Any) -> List[Dict[str, Any]]:
         }
         """
     )
-    await asyncio.sleep(0.2)
+    # Extended observation window — many live-region updates fire after async
+    # XHR / debounce delays. 200ms misses real announcements; 1500ms catches
+    # most form-submit-driven status updates without bloating runtime.
+    await asyncio.sleep(1.5)
     dynamic_events = await page.evaluate(
         """
         () => {

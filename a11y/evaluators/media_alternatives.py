@@ -32,16 +32,51 @@ MEDIA_SCAN_SCRIPT = """
   }
 
   function hasCustomControls(el) {
-    // Check if parent has controls-like buttons nearby
-    const parent = el.parentElement;
-    if (!parent) return false;
-    const btns = parent.querySelectorAll(
-      'button, [role="button"], [aria-label*="play" i], [aria-label*="pause" i], [aria-label*="mute" i]'
+    // Look for player-like ancestor and probe its descendant controls.
+    // Broadened to common custom-player root patterns (Plyr, Video.js, JW, Brightcove, etc).
+    const playerRoot = el.closest(
+      '[class*="player" i], [class*="video" i][class*="container" i], [data-player], ' +
+      '[class*="plyr" i], [class*="vjs" i], [class*="jwplayer" i], [class*="brightcove" i], ' +
+      '[role="application"]'
+    ) || el.parentElement;
+    if (!playerRoot) return false;
+    const btns = playerRoot.querySelectorAll(
+      'button, [role="button"], [aria-label*="play" i], [aria-label*="pause" i], ' +
+      '[aria-label*="mute" i], [class*="play-button" i], [class*="pause" i], [class*="control" i]'
     );
     return btns.length > 0;
   }
 
-  const videos = Array.from(document.querySelectorAll('video')).map(el => {
+  function isDecorative(el, isAutoplay, isMuted, hasAudioTrack, hasNativeControls) {
+    // Muted, autoplaying, looping, no controls, no audio track → decorative background video.
+    // WCAG 1.2.x captions/descriptions don't apply to media without audio.
+    const looping = el.hasAttribute('loop') || el.loop;
+    return isAutoplay && isMuted && looping && !hasNativeControls && !hasAudioTrack;
+  }
+
+  // Walk light DOM + open shadow roots, then dedupe by element identity.
+  function collectMedia(root, tag, out, seen) {
+    if (!root) return;
+    const list = (root.querySelectorAll ? root.querySelectorAll(tag) : []);
+    for (const el of list) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      out.push(el);
+    }
+    // Recurse into open shadow roots
+    const all = (root.querySelectorAll ? root.querySelectorAll('*') : []);
+    for (const el of all) {
+      if (el.shadowRoot) collectMedia(el.shadowRoot, tag, out, seen);
+    }
+  }
+  const videoSeen = new Set();
+  const videoEls = [];
+  collectMedia(document, 'video', videoEls, videoSeen);
+  const audioSeen = new Set();
+  const audioEls = [];
+  collectMedia(document, 'audio', audioEls, audioSeen);
+
+  const videos = videoEls.map(el => {
     const tracks = getTrackKinds(el);
     const captionTracks = tracks.filter(t => t.kind === 'captions' || t.kind === 'subtitles');
     const descTracks = tracks.filter(t => t.kind === 'descriptions');
@@ -66,6 +101,7 @@ MEDIA_SCAN_SCRIPT = """
       isAutoplay,
       isMuted,
       hasAudioTrack,
+      isDecorative: isDecorative(el, isAutoplay, isMuted, hasAudioTrack, hasNativeControls),
       tracks,
       captionTracks,
       descTracks,
@@ -75,7 +111,7 @@ MEDIA_SCAN_SCRIPT = """
     };
   });
 
-  const audios = Array.from(document.querySelectorAll('audio')).map(el => {
+  const audios = audioEls.map(el => {
     const hasNativeControls = el.hasAttribute('controls');
     const customControls = hasCustomControls(el);
     const isAutoplay = el.hasAttribute('autoplay');
@@ -151,8 +187,11 @@ async def run_media_alternatives_evaluator(page: Any) -> List[Dict[str, Any]]:
         )
 
     # --- 1.2.2 / 1.2.5: Captions and Audio Descriptions for video ---
-    videos_missing_captions = [v for v in videos if not v.get("hasCaptions")]
-    videos_missing_desc = [v for v in videos if not v.get("hasDescriptions") and not v.get("nearbyTranscriptLinks")]
+    # Decorative (muted+autoplay+loop, no audio track, no controls) video does not
+    # carry meaningful audio content — captions / descriptions don't apply.
+    eligible_videos = [v for v in videos if not v.get("isDecorative")]
+    videos_missing_captions = [v for v in eligible_videos if not v.get("hasCaptions")]
+    videos_missing_desc = [v for v in eligible_videos if not v.get("hasDescriptions") and not v.get("nearbyTranscriptLinks")]
 
     if videos_missing_captions:
         first = videos_missing_captions[0]

@@ -17,8 +17,26 @@ FOCUS_ACTIVE_SCRIPT = """
 
   const el = document.activeElement;
   if (!el || !el.matches) return null;
+  // Force layout/style flush so :focus-visible-driven styles are committed
+  // before we sample computedStyle. Without this, transitions that haven't
+  // finished can read as a missing indicator.
+  void el.offsetHeight;
   const rect = el.getBoundingClientRect();
   const style = window.getComputedStyle(el);
+  // Also sample a synthetic ::before pseudo — some designs render the focus
+  // ring on a pseudo-element rather than on the host.
+  const beforeStyle = window.getComputedStyle(el, '::before');
+  const afterStyle = window.getComputedStyle(el, '::after');
+  function pseudoHasIndicator(s) {
+    if (!s) return false;
+    const ow = parseFloat(s.outlineWidth || '0') || 0;
+    const bw = parseFloat(s.borderWidth || '0') || 0;
+    return (
+      (s.outlineStyle && s.outlineStyle !== 'none' && ow > 0) ||
+      (s.boxShadow && s.boxShadow !== 'none') ||
+      (s.borderStyle && s.borderStyle !== 'none' && bw > 0)
+    );
+  }
   const centerX = Math.min(Math.max(rect.left + rect.width / 2, 0), Math.max(window.innerWidth - 1, 0));
   const centerY = Math.min(Math.max(rect.top + rect.height / 2, 0), Math.max(window.innerHeight - 1, 0));
   const topEl = document.elementFromPoint(centerX, centerY);
@@ -28,7 +46,9 @@ FOCUS_ACTIVE_SCRIPT = """
   const hasIndicator =
     (style.outlineStyle && style.outlineStyle !== 'none' && outlineWidth > 0) ||
     (style.boxShadow && style.boxShadow !== 'none') ||
-    (style.borderStyle && style.borderStyle !== 'none' && borderWidth > 0);
+    (style.borderStyle && style.borderStyle !== 'none' && borderWidth > 0) ||
+    pseudoHasIndicator(beforeStyle) ||
+    pseudoHasIndicator(afterStyle);
   const indicatorChanged =
     window.__a11yPreviousFocusStyle &&
     (
@@ -74,7 +94,8 @@ async def run_focus_visibility_evaluator(page: Any) -> List[Dict[str, Any]]:
 
     for _ in range(8):
         await page.keyboard.press("Tab")
-        await asyncio.sleep(0.03)
+        # Allow :focus-visible-driven styles & focus-ring transitions to settle.
+        await asyncio.sleep(0.12)
         sample = await page.evaluate(FOCUS_ACTIVE_SCRIPT)
         if not sample:
             continue

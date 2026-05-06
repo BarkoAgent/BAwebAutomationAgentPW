@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Dict, List
 
 from ..models import COVERAGE_AUTOMATED, COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW, OUTCOME_PASSED
+
+logger = logging.getLogger(__name__)
 
 
 # WCAG 2.3.3 (AAA): Animation from Interactions
@@ -77,6 +80,7 @@ async def run_motion_preference_evaluator(page: Any) -> List[Dict[str, Any]]:
     try:
         css_check = await page.evaluate(REDUCED_MOTION_CSS_CHECK)
     except Exception:
+        logger.warning("motion_preference: CSS prefers-reduced-motion scan failed", exc_info=True)
         css_check = {"hasReducedMotionRule": False, "ruleCount": 0}
 
     # Emulate prefers-reduced-motion: reduce
@@ -85,17 +89,19 @@ async def run_motion_preference_evaluator(page: Any) -> List[Dict[str, Any]]:
         await asyncio.sleep(0.3)
         animations_under_reduced = await page.evaluate(ANIMATION_SCAN_SCRIPT)
     except Exception:
+        logger.warning("motion_preference: animation scan under reduced-motion failed", exc_info=True)
         animations_under_reduced = []
     finally:
         try:
             await page.emulate_media(reduced_motion="no-preference")
         except Exception:
-            pass
+            logger.warning("motion_preference: reset of reduced-motion emulation failed", exc_info=True)
 
     # Compare: get animations without reduced-motion emulation
     try:
         animations_normal = await page.evaluate(ANIMATION_SCAN_SCRIPT)
     except Exception:
+        logger.warning("motion_preference: animation scan in normal mode failed", exc_info=True)
         animations_normal = []
 
     has_reduced_motion_css = css_check.get("hasReducedMotionRule", False)

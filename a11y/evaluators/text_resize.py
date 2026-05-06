@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from typing import Any, Dict, List
 
 from ..models import COVERAGE_AUTOMATED, COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW, OUTCOME_PASSED
+
+logger = logging.getLogger(__name__)
 
 
 # WCAG 1.4.12 mandates these overrides must not cause content/functionality loss
@@ -150,7 +153,7 @@ async def _screenshot_element(page: Any, locator_str: str) -> str:
         data = await loc.screenshot(type="jpeg", quality=70)
         return base64.b64encode(data).decode()
     except Exception:
-        pass
+        logger.debug("text_resize: element screenshot failed for %s, falling back to viewport", locator_str, exc_info=True)
     try:
         await page.evaluate(
             "(sel) => { const el = document.querySelector(sel); if (el) el.scrollIntoView({block: 'center'}); }",
@@ -159,6 +162,7 @@ async def _screenshot_element(page: Any, locator_str: str) -> str:
         data = await page.screenshot(full_page=False, type="jpeg", quality=55)
         return base64.b64encode(data).decode()
     except Exception:
+        logger.warning("text_resize: viewport-fallback screenshot failed for %s", locator_str, exc_info=True)
         return ""
 
 
@@ -181,10 +185,11 @@ async def run_text_resize_evaluator(page: Any) -> List[Dict[str, Any]]:
                     await page.screenshot(full_page=False, type="jpeg", quality=55)
                 ).decode()
             except Exception:
-                pass
+                logger.warning("text_resize: spacing fallback viewport screenshot failed", exc_info=True)
 
         await page.evaluate(REMOVE_SPACING_SCRIPT)
     except Exception:
+        logger.warning("text_resize: spacing override / overflow scan pipeline failed", exc_info=True)
         spacing_data = {"overflowing": [], "bodyOverflow": False}
 
     overflowing = spacing_data.get("overflowing", [])
@@ -254,7 +259,7 @@ async def run_text_resize_evaluator(page: Any) -> List[Dict[str, Any]]:
                 await page.screenshot(full_page=False, type="jpeg", quality=55)
             ).decode()
         except Exception:
-            pass
+            logger.warning("text_resize: zoom screenshot capture failed", exc_info=True)
         await page.evaluate("""
             () => {
               document.documentElement.style.zoom = '';
@@ -263,6 +268,7 @@ async def run_text_resize_evaluator(page: Any) -> List[Dict[str, Any]]:
             }
         """)
     except Exception:
+        logger.warning("text_resize: 200%% zoom probe pipeline failed", exc_info=True)
         zoom_clipped = []
 
     if zoom_clipped:
