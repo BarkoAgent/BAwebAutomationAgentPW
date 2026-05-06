@@ -7,7 +7,11 @@ import logging
 
 import ba_ws_sdk.streaming as streaming
 import ba_ws_sdk.file_system as file_system
+from dotenv import load_dotenv
 from playwright.async_api import async_playwright
+load_dotenv()
+
+DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "10"))  # seconds; Playwright expects ms
 
 test_variables = {}
 driver: dict[str, object] = {}
@@ -19,7 +23,7 @@ def clean_html(html_content):
         html_content = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html_content, flags=re.DOTALL)
     return html_content
 
-async def stop_all_drivers():
+async def stop_all_drivers(**kwargs):
     global driver
     for run_id, d in list(driver.items()):
         try:
@@ -98,7 +102,13 @@ async def create_driver(_run_test_id='1'):
     driver[_run_test_id] = {'playwright': playwright, 'browser': browser, 'context': context, 'page': page}
 
     main_url = os.getenv("MAIN_URL", "https://beta.barkoagent.com")
-    await streaming.astart_stream(driver[_run_test_id], run_id=_run_test_id, fps=0.5, jpeg_quality=70)
+    _stream_stop_after_raw = os.getenv("STREAM_STOP_AFTER_S", "600")
+    try:
+        _stream_stop_after = float(_stream_stop_after_raw)
+    except ValueError:
+        logging.warning(f"Invalid STREAM_STOP_AFTER_S value '{_stream_stop_after_raw}', using default 600s")
+        _stream_stop_after = 600.0
+    await streaming.astart_stream(driver[_run_test_id], run_id=_run_test_id, fps=0.5, jpeg_quality=70, stop_after=_stream_stop_after)
     await page.goto(main_url)
     return "driver created"
 
@@ -171,7 +181,7 @@ async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 
     if use_vars == 'true' and _run_test_id in test_variables:
         value = test_variables[_run_test_id].get(value, value)
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=10000)
+        await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
         await page.fill(locator, value)
     except Exception:
         await streaming.capture_error_frame_async(_run_test_id, "send_keys")
@@ -185,7 +195,7 @@ async def exists(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=15000)
+        await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
     except Exception:
         await streaming.capture_error_frame_async(_run_test_id, "exists")
         raise
@@ -201,7 +211,7 @@ async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false')
         text = test_variables[_run_test_id].get(text, text)
     locator = f"text={text}"
     try:
-        await page.wait_for_selector(locator, timeout=15000)
+        await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
     except Exception:
         await streaming.capture_error_frame_async(_run_test_id, "exists_with_text")
         raise
@@ -214,7 +224,7 @@ async def does_not_exist(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state='detached', timeout=15000)
+        await page.wait_for_selector(locator, state='detached', timeout=DEFAULT_TIMEOUT * 1000)
     except Exception:
         await streaming.capture_error_frame_async(_run_test_id, "does_not_exist")
         raise
@@ -227,7 +237,7 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, timeout=150000)
+        await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
         await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
     except Exception:
         await streaming.capture_error_frame_async(_run_test_id, "scroll_to_element")
@@ -251,7 +261,7 @@ async def click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
         streaming.drop_recent_timer_frames(_run_test_id)
         await streaming.capture_step_frame_async(
             run_id=_run_test_id,
@@ -271,7 +281,7 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
         streaming.drop_recent_timer_frames(_run_test_id)
         await streaming.capture_step_frame_async(
             run_id=_run_test_id,
@@ -291,7 +301,7 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=150000)
+        await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
         streaming.drop_recent_timer_frames(_run_test_id)
         await streaming.capture_step_frame_async(
             run_id=_run_test_id,
@@ -316,7 +326,7 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     try:
-        await page.wait_for_selector(locator, state="visible", timeout=10000)
+        await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
         streaming.drop_recent_timer_frames(_run_test_id)
         await streaming.capture_step_frame_async(
             run_id=_run_test_id,
