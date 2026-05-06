@@ -906,6 +906,14 @@ let DATA = null;
 const $  = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const safeHref = url => {
+  if (!url) return '';
+  try {
+    const u = new URL(url, location.href);
+    if (['http:', 'https:', 'mailto:'].includes(u.protocol)) return esc(url);
+    return '';
+  } catch { return ''; }
+};
 
 const OUTCOME_META = {
   FAILED:         {key:'fail',   label:'Failed',       cls:'fail'},
@@ -1349,7 +1357,7 @@ function toggleRow(el){
     </div>
 
     <div style="margin-top:12px;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)">
-      ${c.doc_url ? `<a href="${esc(c.doc_url)}" target="_blank" rel="noreferrer" style="color:var(--accent);text-decoration:none">↗ WCAG 2.2 reference</a>` : ''}
+      ${safeHref(c.doc_url) ? `<a href="${safeHref(c.doc_url)}" target="_blank" rel="noreferrer" style="color:var(--accent);text-decoration:none">↗ WCAG 2.2 reference</a>` : ''}
       ${(c.affected_screens||[]).length ? `<span><b style="color:var(--ink-2)">${c.affected_screens.length}</b> screen${c.affected_screens.length>1?'s':''}</span>` : ''}
       ${(c.sources||[]).length ? `<span title="${esc((c.sources||[]).join(', '))}"><b style="color:var(--ink-2)">${c.sources.length}</b> source${c.sources.length>1?'s':''}</span>` : ''}
     </div>
@@ -1405,7 +1413,7 @@ function evidenceHtml(c, e, i){
         ${loc.element_text ? `<dt>Element</dt><dd>
           <code class="codeblock">${esc(loc.element_text)}</code>
         </dd>` : ''}
-        ${loc.page_url ? `<dt>URL</dt><dd><a href="${esc(loc.page_url)}" target="_blank" rel="noreferrer" style="color:var(--accent);font-family:var(--mono);font-size:12px">${esc(loc.page_url)}</a></dd>` : ''}
+        ${safeHref(loc.page_url) ? `<dt>URL</dt><dd><a href="${safeHref(loc.page_url)}" target="_blank" rel="noreferrer" style="color:var(--accent);font-family:var(--mono);font-size:12px">${esc(loc.page_url)}</a></dd>` : ''}
         ${e.source ? `<dt>Source</dt><dd><code class="codeblock inline">${esc(e.source)}</code></dd>` : ''}
         ${e.severity ? `<dt>Severity</dt><dd><span class="sev ${sm.cls}">${sm.label}</span></dd>` : ''}
         ${e.outcome ? `<dt>Outcome</dt><dd><span class="b ${om.cls}">${om.label}</span></dd>` : ''}
@@ -1417,8 +1425,8 @@ function evidenceHtml(c, e, i){
         </dd>` : (shot ? `<dt>Screenshot</dt><dd><code class="codeblock inline">${esc(shot)}</code></dd>` : '')}
       </dl>
       <div class="ev-actions">
-        ${helpUrl ? `<a href="${esc(helpUrl)}" target="_blank" rel="noreferrer">↗ Rule docs</a>` : ''}
-        ${c.doc_url ? `<a href="${esc(c.doc_url)}" target="_blank" rel="noreferrer">↗ WCAG ${c.id}</a>` : ''}
+        ${safeHref(helpUrl) ? `<a href="${safeHref(helpUrl)}" target="_blank" rel="noreferrer">↗ Rule docs</a>` : ''}
+        ${safeHref(c.doc_url) ? `<a href="${safeHref(c.doc_url)}" target="_blank" rel="noreferrer">↗ WCAG ${c.id}</a>` : ''}
       </div>
     </div>
   </div>`;
@@ -1552,7 +1560,7 @@ function renderMatrix(){
   }
 
   const colHeaders = crits.map(c => `
-    <th class="crit-h"><a href="#crit-${esc(c.id)}" style="color:var(--ink-2);text-decoration:none" onclick="document.getElementById('crit-${esc(c.id)}').classList.add('expanded'); document.getElementById('crit-${esc(c.id)}').scrollIntoView=()=>{};">${esc(c.id)}</a></th>
+    <th class="crit-h"><a href="#crit-${esc(c.id)}" style="color:var(--ink-2);text-decoration:none" onclick="(function(){const el=document.getElementById('crit-${esc(c.id)}');if(el){el.classList.add('expanded');el.scrollIntoView({behavior:'smooth',block:'start'});}})()">${esc(c.id)}</a></th>
   `).join('');
 
   const body = screens.map((s, si) => {

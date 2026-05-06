@@ -57,15 +57,10 @@ TARGET_SIZE_SCRIPT = """
     let best = Infinity;
     for (const other of rectsAll) {
       if (other.el === self.el) continue;
-      // Edge-to-edge gap on the dominant axis (x and y), then take the smaller.
-      const dx = Math.max(0, Math.max(self.rect.left - other.rect.right, other.rect.left - self.rect.right));
-      const dy = Math.max(0, Math.max(self.rect.top - other.rect.bottom, other.rect.top - self.rect.bottom));
       // Centre-to-centre Euclidean distance — used for the 24px circle test.
       const ddx = self.cx - other.cx;
       const ddy = self.cy - other.cy;
       const centreDist = Math.sqrt(ddx * ddx + ddy * ddy);
-      const gap = Math.max(dx, dy); // either-axis clearance
-      const score = Math.min(centreDist, gap === 0 ? 0 : Math.max(centreDist, gap));
       if (centreDist < best) best = centreDist;
     }
     return best;

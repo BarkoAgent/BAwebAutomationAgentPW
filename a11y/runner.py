@@ -650,11 +650,6 @@ async def _attach_violation_screenshots(
                         rect = await loc.evaluate(
                             """el => {
                               const r = el.getBoundingClientRect();
-                              let pos = '';
-                              for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
-                                const p = getComputedStyle(n).position;
-                                if (p === 'fixed' || p === 'sticky') { pos = p; break; }
-                              }
                               return {
                                 top: r.top + window.scrollY,
                                 left: r.left + window.scrollX,
@@ -665,8 +660,7 @@ async def _attach_violation_screenshots(
                                 docW: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
                                 docH: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
                                 vw: window.innerWidth,
-                                vh: window.innerHeight,
-                                pinned: pos
+                                vh: window.innerHeight
                               };
                             }"""
                         )
@@ -677,7 +671,6 @@ async def _attach_violation_screenshots(
                     # and let the fallback viewport screenshot below run.
                     if not rect or rect["width"] < 2 or rect["height"] < 2:
                         raise RuntimeError("no usable rect")
-                    use_full_page = False
                     # Highlight via inline style on the element itself. Outline
                     # paints inside the element's stacking context and follows
                     # the element regardless of scroll, layout shift, fixed
@@ -749,11 +742,11 @@ async def _attach_violation_screenshots(
                     try:
                         if clip:
                             raw = await page.screenshot(
-                                full_page=use_full_page, type="jpeg", quality=70, clip=clip
+                                full_page=False, type="jpeg", quality=70, clip=clip
                             )
                         else:
                             raw = await page.screenshot(
-                                full_page=use_full_page, type="jpeg", quality=55
+                                full_page=False, type="jpeg", quality=55
                             )
                         screenshot_b64 = base64.b64encode(raw).decode()
                     except Exception:

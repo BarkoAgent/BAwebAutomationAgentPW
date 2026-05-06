@@ -92,10 +92,25 @@ async def run_motion_preference_evaluator(page: Any) -> List[Dict[str, Any]]:
         logger.warning("motion_preference: animation scan under reduced-motion failed", exc_info=True)
         animations_under_reduced = []
     finally:
-        try:
-            await page.emulate_media(reduced_motion="no-preference")
-        except Exception:
-            logger.warning("motion_preference: reset of reduced-motion emulation failed", exc_info=True)
+        reset_ok = False
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                await page.emulate_media(reduced_motion="no-preference")
+                reset_ok = True
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "motion_preference: reset of reduced-motion emulation failed (attempt %d/3); retrying",
+                    attempt + 1,
+                    exc_info=True,
+                )
+                await asyncio.sleep(0.2)
+        if not reset_ok:
+            logger.error("motion_preference: reset of reduced-motion emulation failed after 3 attempts")
+            assert last_exc is not None
+            raise last_exc
 
     # Compare: get animations without reduced-motion emulation
     try:

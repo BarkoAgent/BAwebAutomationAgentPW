@@ -28,6 +28,8 @@ def build_digest_json(report: Dict[str, Any]) -> str:
     soft_pass: List[Dict[str, Any]] = []
     for c in (report.get("criteria") or []):
         outcome = c.get("outcome_status")
+        if not outcome:
+            continue
         rationale = c.get("pass_rationale")
         if outcome not in ("FAILED", "ERROR", "NEEDS_REVIEW") and rationale not in (
             "limitation_pass",
