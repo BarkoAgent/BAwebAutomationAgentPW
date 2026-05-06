@@ -656,6 +656,92 @@ section.block > .lede{margin:0 0 16px;color:var(--muted);font-size:13px;max-widt
   .crow.head .clvl-cell, .crow.head .ccov-cell{display:none}
 }
 
+/* Small mobile */
+@media(max-width:640px){
+  .main{padding:12px 10px 60px}
+  .report-head{padding:16px 14px;border-radius:11px}
+  h1.title{font-size:21px;line-height:1.2}
+  .subtitle{font-size:12.5px}
+  .head-top{gap:10px}
+  .head-actions{width:100%;gap:5px}
+  .head-actions .btn{flex:1 1 auto;justify-content:center;font-size:12px;padding:6px 10px}
+  .meta-strip{grid-template-columns:1fr 1fr}
+  .meta-cell{border-right:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+  .meta-cell:nth-child(2n){border-right:none}
+  .meta-cell:nth-last-child(-n+2){border-bottom:none}
+
+  section.block{padding:14px 12px;border-radius:11px}
+  section.block > h2{font-size:15px;flex-wrap:wrap}
+  .h2-actions{margin-left:0;width:100%}
+
+  .kpi-row{grid-template-columns:1fr;gap:10px}
+  .kpi{padding:12px 14px}
+  .kpi .num{font-size:24px}
+  .kpi.score .grade{top:12px;right:12px}
+
+  .pillars{grid-template-columns:1fr;gap:10px}
+
+  .wcag-levels{gap:8px}
+  .lvl{flex:1 1 100%;padding:9px 11px}
+
+  .toolbar{position:static;padding:10px;gap:6px}
+  .toolbar-sep{display:none}
+  .search{flex:1 1 100%}
+  .chip-group{width:100%}
+  .chip-group .chip{flex:1 1 auto;justify-content:center}
+  .kbd{display:none}
+
+  /* Criterion table → 2-col card layout */
+  .crow{grid-template-columns: 1fr auto;gap:6px 10px;padding:10px 12px}
+  .crow.head{display:none}
+  .crow .cid{grid-column:1;font-size:12px}
+  .crow .cname{grid-column:1/-1;font-size:13px;order:3}
+  .crow .cname small{font-size:11.5px}
+  .crow .cout-cell{grid-column:2;grid-row:1;justify-self:end;order:2}
+  .crow .cev-cell, .crow .ev-count{grid-column:1/-1;text-align:left;order:4;font-size:11.5px}
+
+  /* Evidence rows */
+  .ev-head{grid-template-columns: auto 1fr auto;gap:6px 8px;padding:8px 10px}
+  .ev-num{grid-column:1;grid-row:1;justify-self:start;font-size:10.5px;padding:1px 6px}
+  .ev-head .sev{grid-column:2;grid-row:1;justify-self:end}
+  .ev-head .ev-toggle{grid-column:3;grid-row:1}
+  .ev-msg{grid-column:1/-1;grid-row:2;font-size:12.5px}
+  .ev-shot-thumb{max-width:100%;max-height:200px}
+
+  .kv{grid-template-columns:1fr;gap:2px 0}
+  .kv > dt{padding-top:8px}
+  .kv > dt:first-child{padding-top:0}
+  .kv code, .codeblock{font-size:11px;padding:6px 8px}
+
+  /* Top offenders list */
+  .list-card .lc-row{grid-template-columns:1fr 50px;grid-template-rows:auto auto;gap:4px 8px;padding:8px 12px}
+  .list-card .lc-row .lc-name{grid-column:1;white-space:normal;word-break:break-all}
+  .list-card .lc-row .lc-count{grid-column:2;grid-row:1}
+  .list-card .lc-row .lc-bar{grid-column:1/-1;grid-row:2}
+
+  /* Scenario log */
+  .scenario .s-row{grid-template-columns: 40px 1fr;gap:4px 10px;padding:8px 12px}
+  .scenario .s-row.head{display:none}
+  .s-num{grid-column:1;grid-row:1}
+  .s-action{grid-column:2;grid-row:1}
+  .s-status{grid-column:2;grid-row:2;justify-self:start}
+  .s-result{grid-column:1/-1;grid-row:3;white-space:normal;word-break:break-word}
+
+  /* Journey */
+  .j-step{flex:1 1 100%;min-width:0}
+
+  /* Matrix: hint horizontal scroll */
+  .matrix th.screen-h, .matrix td.screen-cell{min-width:140px;max-width:160px;font-size:11.5px}
+
+  /* Scope banner */
+  .scope-banner{padding:10px 12px;gap:10px}
+  .scope-banner .sb-body{font-size:12.5px}
+
+  /* Methodology */
+  .eval-head{padding:9px 10px}
+  .eval-name{font-size:12.5px}
+}
+
 /* Print */
 @media print{
   .sidebar, .toolbar, .head-actions{display:none!important}
@@ -1303,7 +1389,7 @@ function rowHtml(c){
     <div class="cid">${esc(c.id)}</div>
     <div class="cname">${esc(c.name)}<small>${esc(c.principle||'')} · ${esc(c.guideline||'')}</small></div>
     <div class="clvl-cell"><span class="lvl-pill ${lvlCls}">${esc(c.level)}</span></div>
-    <div><span class="b ${om.cls}">${om.label}</span></div>
+    <div class="cout-cell"><span class="b ${om.cls}">${om.label}</span></div>
     <div class="ccov-cell"><span class="b ${cm.cls}">${cm.label}</span></div>
     <div class="ev-count ${totalEv>0?'has':''}">
       ${totalEv ? `<b>${failCount}</b>` : `<span style="color:var(--muted-2)">—</span>`}
