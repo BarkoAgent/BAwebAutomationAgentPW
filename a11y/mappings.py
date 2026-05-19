@@ -21,7 +21,7 @@ AXE_RULE_TO_WCAG = {
 
     # 1.3 Adaptable
     "aria-braille-equivalent": ["1.3.1", "4.1.2"],
-    "aria-required-children": ["1.3.1", "4.1.2"],
+    "aria-required-children": ["1.3.1"],
     "aria-required-parent": ["1.3.1", "4.1.2"],
     "aria-text": ["1.3.1", "4.1.2"],
     "definition-list": ["1.3.1"],
@@ -42,7 +42,7 @@ AXE_RULE_TO_WCAG = {
     "list": ["1.3.1"],
     "listitem": ["1.3.1"],
     "page-has-heading-one": ["1.3.1", "2.4.6"],
-    "region": ["1.3.1", "2.4.1"],
+    "region": ["1.3.1"],
     "scope-attr-valid": ["1.3.1"],
     "summary-name": ["1.3.1"],
     "table-duplicate-name": ["1.3.1"],
@@ -54,7 +54,6 @@ AXE_RULE_TO_WCAG = {
     "link-in-text-block": ["1.4.1"],
     "no-autoplay-audio": ["1.4.2"],
     "color-contrast": ["1.4.3"],
-    "color-contrast-enhanced": ["1.4.6"],
     "meta-viewport": ["1.3.4", "1.4.4", "1.4.10"],
     "meta-viewport-large": ["1.4.4"],
     "avoid-inline-spacing": ["1.4.12"],
@@ -68,13 +67,13 @@ AXE_RULE_TO_WCAG = {
     # 2.2 Enough Time
     "blink": ["2.2.2"],
     "marquee": ["2.2.2"],
-    "meta-refresh": ["2.2.1", "3.2.5"],
+    "meta-refresh": ["2.2.1"],
     "meta-refresh-no-exceptions": ["2.2.1"],
 
     # 2.4 Navigable
     "bypass": ["2.4.1"],
     "document-title": ["2.4.2"],
-    "frame-title": ["2.4.1", "4.1.2"],
+    "frame-title": ["4.1.2"],
     "frame-title-unique": ["4.1.2"],
     "skip-link": ["2.4.1"],
 

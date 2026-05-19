@@ -41,58 +41,71 @@ TARGET_SIZE_SCRIPT = """
   const passing = [];
   const elements = Array.from(document.querySelectorAll(selector)).slice(0, 200);
 
+  // Pre-compute visible rects for every interactive element so we can measure
+  // real centre-to-centre distance to nearest neighbour (WCAG 2.5.8 spacing
+  // exception requires actual neighbour distance, not own margins).
+  const rectsAll = [];
   for (const el of elements) {
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') continue;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) continue;
+    rectsAll.push({ el, rect, cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 });
+  }
 
+  function nearestNeighbourDistance(self) {
+    let best = Infinity;
+    for (const other of rectsAll) {
+      if (other.el === self.el) continue;
+      // Centre-to-centre Euclidean distance — used for the 24px circle test.
+      const ddx = self.cx - other.cx;
+      const ddy = self.cy - other.cy;
+      const centreDist = Math.sqrt(ddx * ddx + ddy * ddy);
+      if (centreDist < best) best = centreDist;
+    }
+    return best;
+  }
+
+  for (const item of rectsAll) {
+    const el = item.el;
+    const rect = item.rect;
     const w = rect.width;
     const h = rect.height;
+    const baseInfo = {
+      locator: cssPath(el),
+      text: (el.innerText || el.textContent || '').trim().slice(0, 80),
+      width: Math.round(w),
+      height: Math.round(h),
+    };
 
-    // Check if both dimensions meet the 24px threshold (WCAG 2.5.8 requires both ≥ 24px)
     if (w >= MIN && h >= MIN) {
-      passing.push({ locator: cssPath(el), width: Math.round(w), height: Math.round(h), text: (el.innerText || el.textContent || '').trim().slice(0, 80) });
+      passing.push(baseInfo);
       continue;
     }
 
-    // Both dimensions < 24px — check spacing offset from nearest sibling targets.
-    // NOTE: This uses the element's own margins as a proxy for spacing offset. WCAG 2.5.8
-    // requires measuring actual distance to adjacent interactive targets, not own margins.
-    // An element with large margins may still overlap neighbors with negative margins or
-    // absolute positioning. This is a simplified heuristic; manual review is needed for
-    // elements near boundaries.
-    const marginTop = parseFloat(style.marginTop) || 0;
-    const marginBottom = parseFloat(style.marginBottom) || 0;
-    const marginLeft = parseFloat(style.marginLeft) || 0;
-    const marginRight = parseFloat(style.marginRight) || 0;
+    // Undersized — apply WCAG 2.5.8 spacing-offset exception.
+    // Pass when the nearest interactive neighbour's centre is ≥ 24 CSS-px away
+    // (i.e. a 24px-diameter circle on each target's centre does not intersect).
+    const neighbourDist = nearestNeighbourDistance(item);
+    const meetsSpacing = neighbourDist >= MIN;
 
-    // Effective size including spacing in each direction
-    const effectiveW = w + marginLeft + marginRight;
-    const effectiveH = h + marginTop + marginBottom;
-
-    const meetsSpacingOffset = effectiveW >= MIN && effectiveH >= MIN;
-
-    if (!meetsSpacingOffset) {
+    if (!meetsSpacing) {
       if (failing.length < 20) {
-        failing.push({
-          locator: cssPath(el),
-          text: (el.innerText || el.textContent || '').trim().slice(0, 80),
-          width: Math.round(w),
-          height: Math.round(h),
-          effectiveWidth: Math.round(effectiveW),
-          effectiveHeight: Math.round(effectiveH),
+        failing.push(Object.assign({}, baseInfo, {
+          neighbourDistance: Number.isFinite(neighbourDist) ? Math.round(neighbourDist) : null,
           tag: el.tagName.toLowerCase(),
           type: el.getAttribute('type') || '',
           role: el.getAttribute('role') || '',
-        });
+        }));
       }
     } else {
-      passing.push({ locator: cssPath(el), width: Math.round(w), height: Math.round(h), text: (el.innerText || el.textContent || '').trim().slice(0, 80) });
+      passing.push(Object.assign({}, baseInfo, {
+        neighbourDistance: Number.isFinite(neighbourDist) ? Math.round(neighbourDist) : null,
+      }));
     }
   }
 
-  return { failing, passing_count: passing.length, total: elements.length };
+  return { failing, passing_count: passing.length, total: rectsAll.length };
 }
 """
 

@@ -49,11 +49,42 @@ STRUCTURE_AUDIT_SCRIPT = """
     }
   }
 
+  // Detect skip-link: first focusable anchor whose href targets an in-page
+  // landmark (#main / #content / etc) and whose visible text reads as a skip
+  // affordance. WCAG 2.4.1 wants both an in-page jump *and* a target landmark.
+  const focusableAnchors = Array.from(document.querySelectorAll(
+    'a[href^="#"]:not([href="#"]), [role="link"][href^="#"]'
+  ));
+  let skipLink = null;
+  const skipPatterns = /(skip|jump|go)\s*(to)?\s*(main|content|nav|primary)/i;
+  for (const a of focusableAnchors.slice(0, 8)) {
+    const href = a.getAttribute('href') || '';
+    const text = (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim();
+    const id = href.slice(1);
+    const target = id ? document.getElementById(id) : null;
+    const targetIsLandmark = !!target && (
+      target.tagName.toLowerCase() === 'main' ||
+      target.getAttribute('role') === 'main' ||
+      /^(content|main|primary)/i.test(id)
+    );
+    if (targetIsLandmark || skipPatterns.test(text)) {
+      skipLink = {
+        locator: cssPath(a),
+        text: text.slice(0, 80),
+        href,
+        targetExists: !!target,
+        targetIsLandmark,
+      };
+      break;
+    }
+  }
+
   return {
     landmarks,
     headings,
     headingJump,
     duplicateIds: duplicates,
+    skipLink,
   };
 }
 """
@@ -67,6 +98,7 @@ async def run_structure_evaluator(page: Any) -> List[Dict[str, Any]]:
     headings = audit.get("headings", [])
     heading_jump = audit.get("headingJump")
     duplicate_ids = audit.get("duplicateIds", [])
+    skip_link = audit.get("skipLink")
 
     if landmarks.get("main", 0) < 1:
         results.append(
@@ -109,19 +141,39 @@ async def run_structure_evaluator(page: Any) -> List[Dict[str, Any]]:
                 "metadata": {"landmarks": landmarks},
             }
         )
-        results.append(
-            {
-                "criterion_id": "2.4.1",
-                "source": "custom:structure",
-                "coverage_status": COVERAGE_AUTOMATED,
-                "outcome": OUTCOME_PASSED,
-                "severity": "moderate",
-                "message": "A main landmark was detected for basic bypass-block support.",
-                "locator": "main",
-                "element_text": "",
-                "metadata": {"landmarks": landmarks},
-            }
-        )
+        # WCAG 2.4.1 wants both a landmark target AND an in-page bypass affordance
+        # (skip-link, heading nav, or list of links). A <main> alone is insufficient.
+        if skip_link and skip_link.get("targetIsLandmark"):
+            results.append(
+                {
+                    "criterion_id": "2.4.1",
+                    "source": "custom:structure",
+                    "coverage_status": COVERAGE_AUTOMATED,
+                    "outcome": OUTCOME_PASSED,
+                    "severity": "moderate",
+                    "message": "Main landmark plus in-page skip link target a landmark — basic bypass-block mechanism present.",
+                    "locator": skip_link.get("locator", "main"),
+                    "element_text": skip_link.get("text", ""),
+                    "metadata": {"landmarks": landmarks, "skip_link": skip_link},
+                }
+            )
+        else:
+            results.append(
+                {
+                    "criterion_id": "2.4.1",
+                    "source": "custom:structure",
+                    "coverage_status": COVERAGE_AUTOMATED,
+                    "outcome": OUTCOME_FAILED,
+                    "severity": "serious",
+                    "message": (
+                        "Main landmark detected but no in-page skip link targeting it was found. "
+                        "WCAG 2.4.1 requires a real bypass mechanism, not landmark presence alone."
+                    ),
+                    "locator": "main",
+                    "element_text": "",
+                    "metadata": {"landmarks": landmarks, "skip_link": skip_link},
+                }
+            )
 
     if not headings:
         results.append(

@@ -13,6 +13,10 @@ from .structure import run_structure_evaluator
 from .text_resize import run_text_resize_evaluator
 from .timing import run_timing_evaluator
 from .viewport import run_viewport_reflow_evaluator
+from ._manifests import (
+    all_manifests,
+    manifests_for_criterion,
+)
 
 __all__ = [
     "run_context_change_evaluator",
@@ -30,4 +34,6 @@ __all__ = [
     "run_text_resize_evaluator",
     "run_timing_evaluator",
     "run_viewport_reflow_evaluator",
+    "all_manifests",
+    "manifests_for_criterion",
 ]

@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
+
+from playwright._impl._errors import TargetClosedError
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,6 +20,8 @@ from urllib.parse import urlparse
 import ba_ws_sdk.file_system as file_system
 
 from .evaluators import (
+    all_manifests,
+    manifests_for_criterion,
     run_context_change_evaluator,
     run_focus_visibility_evaluator,
     run_focus_appearance_evaluator,
@@ -49,8 +56,13 @@ from .models import (
     OUTCOME_NOT_APPLICABLE,
     OUTCOME_NOT_TESTED,
     OUTCOME_PASSED,
+    PASS_RATIONALE_ALL_CHECKED_CLEAN,
+    PASS_RATIONALE_AXE_RULE_CLEAN,
+    PASS_RATIONALE_HEURISTIC_PROXY,
+    PASS_RATIONALE_LIMITATION_PASS,
+    PASS_RATIONALE_NO_APPLICABLE,
 )
-from .reporting import build_digest_json, render_html_report
+from .reporting import build_digest_json, render_html_report, render_stakeholder_summary
 from .registry import SECTION_IDS, build_registry
 
 
@@ -153,6 +165,22 @@ def _criterion_result_from_definition(definition) -> CriterionResult:
     if definition.default_coverage != COVERAGE_MANUAL_REQUIRED:
         coverage_status = COVERAGE_NOT_TESTED
 
+    if definition.default_coverage == COVERAGE_MANUAL_REQUIRED:
+        explanation = (
+            "Not tested by automation in this run — this criterion requires manual review. "
+            "Recorded as Not Tested so the gap is visible; it does not affect the health score."
+        )
+    elif definition.default_coverage == COVERAGE_AUTOMATED:
+        explanation = (
+            "Automation is registered for this criterion but produced no evidence in this run "
+            "(no applicable elements detected, or evaluator did not fire)."
+        )
+    else:
+        explanation = (
+            "Semi-automated coverage available but no evidence was produced in this run — "
+            "manual confirmation needed."
+        )
+
     return CriterionResult(
         id=definition.id,
         kind=definition.kind,
@@ -164,7 +192,7 @@ def _criterion_result_from_definition(definition) -> CriterionResult:
         outcome_status=OUTCOME_NOT_TESTED,
         doc_url=definition.doc_url,
         coverage_notes=list(definition.notes),
-        not_tested_explanation="No evidence collected for this criterion in the current run.",
+        not_tested_explanation=explanation,
     )
 
 
@@ -353,7 +381,187 @@ def _compact_node_text(node: Dict[str, Any]) -> str:
 
 
 # Maximum screenshots per axe rule so large violation lists don't bloat reports.
-_AXE_SCREENSHOT_LIMIT_PER_RULE = 3
+_AXE_SCREENSHOT_LIMIT_PER_RULE = 25
+# Custom-evaluator screenshot pass cap.
+_CUSTOM_SCREENSHOT_LIMIT = 60
+
+
+async def _capture_overlay_screenshot(page: Any, css_chain: List[str]) -> Optional[str]:
+    """Resolve a CSS-chain locator (with optional iframe descent), highlight the
+    element with an inline outline, and return a viewport-clipped JPEG as
+    base64. Returns None if the element cannot be resolved or screenshotted.
+    Falls back to plain viewport capture without highlight if highlighting
+    fails."""
+    if not css_chain:
+        return None
+    css = css_chain[-1]
+    screenshot_b64: Optional[str] = None
+    try:
+        scope: Any = page
+        for frame_sel in css_chain[:-1]:
+            scope = scope.frame_locator(frame_sel)
+        base_loc = scope.locator(css)
+        loc = None
+        try:
+            count = await base_loc.count()
+        except Exception:
+            logger.warning("locator count() failed for %s; defaulting to 1", css, exc_info=True)
+            count = 1
+        for _i in range(min(count or 1, 8)):
+            cand = base_loc.nth(_i)
+            try:
+                visible = await cand.evaluate(
+                    """el => {
+                      const r = el.getBoundingClientRect();
+                      const cs = getComputedStyle(el);
+                      return r.width > 0 && r.height > 0
+                        && cs.visibility !== 'hidden'
+                        && cs.display !== 'none';
+                    }""",
+                    timeout=2000,
+                )
+            except Exception:
+                logger.debug("visibility probe failed for %s nth=%d", css, _i, exc_info=True)
+                visible = False
+            if visible:
+                loc = cand
+                break
+        if loc is None:
+            raise RuntimeError("no visible candidate for %s" % css)
+        await loc.scroll_into_view_if_needed(timeout=2000)
+        rect = None
+        try:
+            rect = await loc.evaluate(
+                """el => {
+                  const r = el.getBoundingClientRect();
+                  return {
+                    vTop: r.top, vLeft: r.left,
+                    width: Math.max(r.width, 1), height: Math.max(r.height, 1),
+                    vw: window.innerWidth, vh: window.innerHeight
+                  };
+                }"""
+            )
+        except Exception:
+            logger.warning("rect probe failed for %s", css, exc_info=True)
+            rect = None
+        if not rect or rect["width"] < 2 or rect["height"] < 2:
+            raise RuntimeError("no usable rect")
+        style_snap = None
+        try:
+            style_snap = await loc.evaluate(
+                """el => {
+                  const prev = {
+                    outline: el.style.outline,
+                    outlineOffset: el.style.outlineOffset,
+                    boxShadow: el.style.boxShadow,
+                    priority: {
+                      outline: el.style.getPropertyPriority('outline'),
+                      outlineOffset: el.style.getPropertyPriority('outline-offset'),
+                      boxShadow: el.style.getPropertyPriority('box-shadow')
+                    }
+                  };
+                  el.style.setProperty('outline', '4px solid #B00020', 'important');
+                  el.style.setProperty('outline-offset', '2px', 'important');
+                  el.style.setProperty('box-shadow', '0 0 0 4px rgba(255,255,255,0.9), 0 0 0 8px rgba(176,0,32,0.35)', 'important');
+                  return prev;
+                }"""
+            )
+        except Exception:
+            logger.warning("highlight style apply failed for %s", css, exc_info=True)
+        frame_off_x = 0
+        frame_off_y = 0
+        main_vw = rect["vw"]
+        main_vh = rect["vh"]
+        if css_chain[:-1]:
+            try:
+                outer_loc = page.locator(css_chain[0]).first
+                outer_rect = await outer_loc.evaluate(
+                    """el => {
+                      const r = el.getBoundingClientRect();
+                      return {x: r.left, y: r.top, vw: window.innerWidth, vh: window.innerHeight};
+                    }"""
+                )
+                frame_off_x = outer_rect["x"]
+                frame_off_y = outer_rect["y"]
+                main_vw = outer_rect["vw"]
+                main_vh = outer_rect["vh"]
+            except Exception:
+                logger.warning("iframe outer rect probe failed for %s", css_chain[0], exc_info=True)
+        clip = None
+        try:
+            pad_x = max(180, int(main_vw * 0.35))
+            pad_y = max(140, int(main_vh * 0.28))
+            elem_x = rect["vLeft"] + frame_off_x
+            elem_y = rect["vTop"] + frame_off_y
+            x = max(0, elem_x - pad_x)
+            y = max(0, elem_y - pad_y)
+            w = min(main_vw - x, rect["width"] + pad_x * 2)
+            h = min(main_vh - y, rect["height"] + pad_y * 2)
+            if w > 4 and h > 4:
+                clip = {"x": x, "y": y, "width": w, "height": h}
+        except Exception:
+            logger.warning("clip computation failed for %s", css, exc_info=True)
+            clip = None
+        try:
+            if clip:
+                raw = await page.screenshot(full_page=False, type="jpeg", quality=70, clip=clip)
+            else:
+                raw = await page.screenshot(full_page=False, type="jpeg", quality=55)
+            screenshot_b64 = base64.b64encode(raw).decode()
+        except Exception:
+            logger.warning("screenshot capture failed for %s", css, exc_info=True)
+            screenshot_b64 = None
+        if style_snap is not None:
+            try:
+                await loc.evaluate(
+                    """(el, prev) => {
+                      const set = (prop, val, prio) => {
+                        if (val) el.style.setProperty(prop, val, prio || '');
+                        else el.style.removeProperty(prop);
+                      };
+                      set('outline', prev.outline, prev.priority.outline);
+                      set('outline-offset', prev.outlineOffset, prev.priority.outlineOffset);
+                      set('box-shadow', prev.boxShadow, prev.priority.boxShadow);
+                    }""",
+                    style_snap,
+                )
+            except Exception:
+                logger.debug("highlight style restore failed for %s", css, exc_info=True)
+    except Exception:
+        logger.warning("element screenshot pipeline failed for %s", css, exc_info=True)
+    if not screenshot_b64:
+        try:
+            raw = await page.screenshot(full_page=False, type="jpeg", quality=55)
+            screenshot_b64 = base64.b64encode(raw).decode()
+        except Exception:
+            logger.warning("fallback viewport screenshot failed", exc_info=True)
+            screenshot_b64 = None
+    return screenshot_b64
+
+
+async def _attach_custom_screenshots(page: Any, custom_results: List[Dict[str, Any]]) -> None:
+    """Capture element-targeted screenshots for custom-evaluator check results
+    that have a ``locator`` and no existing ``screenshot_b64``. Best-effort —
+    any per-check failure leaves the result unchanged."""
+    if not custom_results:
+        return
+    await _freeze_motion_for_screenshot(page)
+    shots = 0
+    for check in custom_results:
+        if shots >= _CUSTOM_SCREENSHOT_LIMIT:
+            break
+        if check.get("screenshot_b64"):
+            continue
+        loc = check.get("locator") or ""
+        if not loc or not isinstance(loc, str):
+            continue
+        # Skip non-DOM pseudo-locators emitted by metadata checks.
+        if loc in ("document.title",) or loc.startswith("document."):
+            continue
+        b64 = await _capture_overlay_screenshot(page, [loc])
+        if b64:
+            check["screenshot_b64"] = b64
+            shots += 1
 
 
 async def _attach_violation_screenshots(
@@ -374,6 +582,8 @@ async def _attach_violation_screenshots(
     if axe_payload.get("status") != "success" or not axe_payload.get("results"):
         return
 
+    await _freeze_motion_for_screenshot(page)
+
     for rule in axe_payload["results"].get("violations", []) or []:
         rule_id = rule.get("id", "")
         if rule_ids is not None and rule_id not in rule_ids:
@@ -385,25 +595,188 @@ async def _attach_violation_screenshots(
                 break
             target = node.get("target", [])
             screenshot_b64 = None
-            # Try element-level screenshot first (cleaner view for the engineer).
-            # ``target`` entries can be strings (plain CSS) or lists (shadow-DOM
-            # path).  We only attempt element screenshots for plain CSS strings.
-            css = target[0] if target and isinstance(target[0], str) else None
+            # axe target is a chain: [iframeSel, ..., elementSel]. Descend through
+            # frame_locator for each leading iframe selector so we resolve the
+            # actual offending element, not its containing iframe.
+            css_chain = [t for t in target if isinstance(t, str)] if target else []
+            css = css_chain[-1] if css_chain else None
             if css:
+                overlay_added = False
                 try:
-                    loc = page.locator(css).first
+                    scope: Any = page
+                    for frame_sel in css_chain[:-1]:
+                        scope = scope.frame_locator(frame_sel)
+                    # Pick first VISIBLE match. Class-based axe selectors can
+                    # match hidden mobile/desktop duplicates; .first alone may
+                    # land on a display:none element with rect 0,0,0,0.
+                    base_loc = scope.locator(css)
+                    loc = None
+                    try:
+                        count = await base_loc.count()
+                    except Exception:
+                        logger.warning("axe shot: locator count() failed for %s", css, exc_info=True)
+                        count = 1
+                    for _i in range(min(count or 1, 8)):
+                        cand = base_loc.nth(_i)
+                        try:
+                            visible = await cand.evaluate(
+                                """el => {
+                                  const r = el.getBoundingClientRect();
+                                  const cs = getComputedStyle(el);
+                                  return r.width > 0 && r.height > 0
+                                    && cs.visibility !== 'hidden'
+                                    && cs.display !== 'none';
+                                }""",
+                                timeout=2000,
+                            )
+                        except Exception:
+                            logger.debug("axe shot: visibility probe failed for %s nth=%d", css, _i, exc_info=True)
+                            visible = False
+                        if visible:
+                            loc = cand
+                            break
+                    if loc is None:
+                        raise RuntimeError("no visible candidate for %s" % css)
                     await loc.scroll_into_view_if_needed(timeout=2000)
-                    raw = await loc.screenshot(type="jpeg", quality=70)
-                    screenshot_b64 = base64.b64encode(raw).decode()
+                    # Measure once BEFORE overlay insertion so overlay placement
+                    # and clip use the same coordinates. Re-measuring after
+                    # insertion drifts when the overlay forces reflow (scrollbar
+                    # appears, document height grows). Also detect fixed/sticky
+                    # elements so we can avoid full_page capture, which expands
+                    # the layout viewport and shifts those elements relative to
+                    # an absolute-positioned overlay.
+                    rect = None
+                    try:
+                        rect = await loc.evaluate(
+                            """el => {
+                              const r = el.getBoundingClientRect();
+                              return {
+                                top: r.top + window.scrollY,
+                                left: r.left + window.scrollX,
+                                vTop: r.top,
+                                vLeft: r.left,
+                                width: Math.max(r.width, 1),
+                                height: Math.max(r.height, 1),
+                                docW: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+                                docH: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
+                                vw: window.innerWidth,
+                                vh: window.innerHeight
+                              };
+                            }"""
+                        )
+                    except Exception:
+                        logger.warning("axe shot: rect probe failed for %s", css, exc_info=True)
+                        rect = None
+                    # If rect missing or element has zero size, skip overlay
+                    # and let the fallback viewport screenshot below run.
+                    if not rect or rect["width"] < 2 or rect["height"] < 2:
+                        raise RuntimeError("no usable rect")
+                    # Highlight via inline style on the element itself. Outline
+                    # paints inside the element's stacking context and follows
+                    # the element regardless of scroll, layout shift, fixed
+                    # ancestors, drawers, or z-index ordering. Save+restore
+                    # original style so the page returns to its original state.
+                    style_snap = None
+                    try:
+                        style_snap = await loc.evaluate(
+                            """el => {
+                              const prev = {
+                                outline: el.style.outline,
+                                outlineOffset: el.style.outlineOffset,
+                                boxShadow: el.style.boxShadow,
+                                priority: {
+                                  outline: el.style.getPropertyPriority('outline'),
+                                  outlineOffset: el.style.getPropertyPriority('outline-offset'),
+                                  boxShadow: el.style.getPropertyPriority('box-shadow')
+                                }
+                              };
+                              el.style.setProperty('outline', '4px solid #B00020', 'important');
+                              el.style.setProperty('outline-offset', '2px', 'important');
+                              el.style.setProperty('box-shadow', '0 0 0 4px rgba(255,255,255,0.9), 0 0 0 8px rgba(176,0,32,0.35)', 'important');
+                              return prev;
+                            }"""
+                        )
+                        overlay_added = True
+                    except Exception:
+                        logger.warning("axe shot: highlight style apply failed for %s", css, exc_info=True)
+                    # If element lives inside an iframe, rect is iframe-local.
+                    # Translate by iframe element offset on main page so clip
+                    # (which is in main-page viewport coords) aligns with the
+                    # screenshot. page.screenshot also captures iframe content,
+                    # so the overlay (position:fixed inside iframe) renders at
+                    # the correct visible location automatically.
+                    frame_off_x = 0
+                    frame_off_y = 0
+                    main_vw = rect["vw"]
+                    main_vh = rect["vh"]
+                    if css_chain[:-1]:
+                        try:
+                            outer_loc = page.locator(css_chain[0]).first
+                            outer_rect = await outer_loc.evaluate(
+                                """el => {
+                                  const r = el.getBoundingClientRect();
+                                  return {x: r.left, y: r.top, vw: window.innerWidth, vh: window.innerHeight};
+                                }"""
+                            )
+                            frame_off_x = outer_rect["x"]
+                            frame_off_y = outer_rect["y"]
+                            main_vw = outer_rect["vw"]
+                            main_vh = outer_rect["vh"]
+                        except Exception:
+                            logger.warning("axe shot: iframe outer rect probe failed for %s", css_chain[0], exc_info=True)
+                    clip = None
+                    try:
+                        pad_x = max(180, int(main_vw * 0.35))
+                        pad_y = max(140, int(main_vh * 0.28))
+                        elem_x = rect["vLeft"] + frame_off_x
+                        elem_y = rect["vTop"] + frame_off_y
+                        x = max(0, elem_x - pad_x)
+                        y = max(0, elem_y - pad_y)
+                        w = min(main_vw - x, rect["width"] + pad_x * 2)
+                        h = min(main_vh - y, rect["height"] + pad_y * 2)
+                        if w > 4 and h > 4:
+                            clip = {"x": x, "y": y, "width": w, "height": h}
+                    except Exception:
+                        logger.warning("axe shot: clip computation failed for %s", css, exc_info=True)
+                        clip = None
+                    try:
+                        if clip:
+                            raw = await page.screenshot(
+                                full_page=False, type="jpeg", quality=70, clip=clip
+                            )
+                        else:
+                            raw = await page.screenshot(
+                                full_page=False, type="jpeg", quality=55
+                            )
+                        screenshot_b64 = base64.b64encode(raw).decode()
+                    except Exception:
+                        logger.warning("axe shot: screenshot capture failed for %s", css, exc_info=True)
+                        screenshot_b64 = None
+                    if overlay_added and style_snap is not None:
+                        try:
+                            await loc.evaluate(
+                                """(el, prev) => {
+                                  const set = (prop, val, prio) => {
+                                    if (val) el.style.setProperty(prop, val, prio || '');
+                                    else el.style.removeProperty(prop);
+                                  };
+                                  set('outline', prev.outline, prev.priority.outline);
+                                  set('outline-offset', prev.outlineOffset, prev.priority.outlineOffset);
+                                  set('box-shadow', prev.boxShadow, prev.priority.boxShadow);
+                                }""",
+                                style_snap,
+                            )
+                        except Exception:
+                            logger.debug("axe shot: highlight style restore failed for %s", css, exc_info=True)
                 except Exception:
-                    pass
-            # Fall back to a full-viewport screenshot.
+                    logger.warning("axe shot: element screenshot pipeline failed for %s", css, exc_info=True)
+            # Fall back to a viewport screenshot if the outlined capture failed.
             if not screenshot_b64:
                 try:
                     raw = await page.screenshot(full_page=False, type="jpeg", quality=55)
                     screenshot_b64 = base64.b64encode(raw).decode()
                 except Exception:
-                    pass
+                    logger.warning("axe shot: fallback viewport screenshot failed", exc_info=True)
             if screenshot_b64:
                 node["screenshot_b64"] = screenshot_b64
                 shot_count += 1
@@ -513,6 +886,76 @@ def _register_axe_results(
                 criterion.add_source("axe:{}".format(rule.get("id", "")))
 
 
+def _finalize_criterion_transparency(criteria: List[CriterionResult]) -> None:
+    """Populate manifest_refs / tested_aspects / untested_aspects /
+    automation_limits / pass_rationale on every CriterionResult.
+
+    Called once during finalize after outcomes have stabilised. Decisions are
+    derived purely from the evidence already on the criterion — no extra DOM
+    work.
+    """
+    for criterion in criteria:
+        manifests = manifests_for_criterion(criterion.id)
+        # Restrict per-criterion manifest list to the ones that actually fired
+        # at least one evidence item; if none fired, keep the full list so the
+        # reader still sees what *would* have been checked.
+        contributing_sources = set(criterion.sources or [])
+        fired = [m for m in manifests if m.id in contributing_sources or any(
+            src.startswith(m.id + ":") or src == m.id for src in contributing_sources
+        )]
+        # axe manifests use id 'axe:wcag-<crit>' but evidence sources are 'axe:<rule>',
+        # so include any axe manifest for this criterion if any axe source contributed.
+        axe_fired = any(src.startswith("axe:") for src in contributing_sources)
+        for m in manifests:
+            if m.id.startswith("axe:wcag-") and axe_fired and m not in fired:
+                fired.append(m)
+        active = fired or manifests
+
+        criterion.manifest_refs = [m.id for m in active]
+
+        tested: List[str] = []
+        untested: List[str] = []
+        limits: List[str] = []
+        for m in active:
+            tested.extend(m.what_tested)
+            if m.sampling:
+                tested.append("Sampling: {}".format(m.sampling))
+            untested.extend(m.what_not_tested)
+            limits.extend(m.automation_limits)
+        # De-duplicate while preserving order.
+        criterion.tested_aspects = list(dict.fromkeys(tested))
+        criterion.untested_aspects = list(dict.fromkeys(untested))
+
+        # Add axe runtime limits (per-criterion) from incomplete_checks data.
+        for inc in criterion.incomplete_checks or []:
+            meta = (inc.get("metadata") or {})
+            check = (meta.get("nodeCheckData") or {})
+            key = check.get("messageKey")
+            if key:
+                limits.append("axe incomplete: {}".format(key))
+        criterion.automation_limits = list(dict.fromkeys(limits))
+
+        # Pass rationale only for PASSED outcomes.
+        if criterion.outcome_status != OUTCOME_PASSED:
+            continue
+
+        passed = criterion.passed_checks or []
+        incomplete = criterion.incomplete_checks or []
+        axe_passed = [p for p in passed if str(p.get("source", "") or p.get("rule_id", "")).startswith("axe") or "rule_id" in p]
+        custom_passed = [p for p in passed if not (str(p.get("source", "") or "").startswith("axe") or "rule_id" in p)]
+
+        if not passed:
+            criterion.pass_rationale = PASS_RATIONALE_NO_APPLICABLE
+        elif incomplete and len(incomplete) >= len(axe_passed) and axe_passed and not custom_passed:
+            criterion.pass_rationale = PASS_RATIONALE_LIMITATION_PASS
+        elif axe_passed and not custom_passed:
+            criterion.pass_rationale = PASS_RATIONALE_AXE_RULE_CLEAN
+        elif custom_passed and not axe_passed:
+            criterion.pass_rationale = PASS_RATIONALE_HEURISTIC_PROXY
+        else:
+            criterion.pass_rationale = PASS_RATIONALE_ALL_CHECKED_CLEAN
+
+
 def _build_sections(criteria: List[CriterionResult]) -> List[ReportSection]:
     grouped: Dict[str, List[str]] = {}
     for criterion in criteria:
@@ -549,13 +992,17 @@ def _summary_from_criteria(criteria: List[CriterionResult]) -> Dict[str, Any]:
         COVERAGE_MANUAL_REQUIRED: 0,
         COVERAGE_NOT_TESTED: 0,
     }
+    pass_rationale_counts: Dict[str, int] = {}
     for criterion in criteria:
         outcome_counts[criterion.outcome_status] = outcome_counts.get(criterion.outcome_status, 0) + 1
         coverage_counts[criterion.coverage_status] = coverage_counts.get(criterion.coverage_status, 0) + 1
+        if criterion.pass_rationale:
+            pass_rationale_counts[criterion.pass_rationale] = pass_rationale_counts.get(criterion.pass_rationale, 0) + 1
     return {
         "total_rows": len(criteria),
         "outcome_counts": outcome_counts,
         "coverage_counts": coverage_counts,
+        "pass_rationale_counts": pass_rationale_counts,
     }
 
 
@@ -574,6 +1021,7 @@ def _report_storage_dir() -> Path:
             try:
                 shutil.move(str(legacy_path), str(target_path))
             except Exception:
+                logger.warning("legacy attachments migration failed for %s", legacy_path, exc_info=True)
                 continue
 
     return reports_dir
@@ -595,6 +1043,15 @@ def _persist_html_report(report: AccessibilityReport) -> str:
     return path.name
 
 
+def _persist_stakeholder_summary(report: AccessibilityReport, detail_html_name: str) -> str:
+    path = _report_storage_dir() / "{}_summary.html".format(report.report_meta["report_id"])
+    path.write_text(
+        render_stakeholder_summary(report.to_dict(), detail_artifact=detail_html_name),
+        encoding="utf-8",
+    )
+    return path.name
+
+
 def _persist_digest_report(report: AccessibilityReport) -> str:
     path = _artifact_path(report.report_meta["report_id"] + "_digest", "json")
     path.write_text(build_digest_json(report.to_dict()), encoding="utf-8")
@@ -610,6 +1067,7 @@ def _git_commit() -> str:
         )
         return output.strip()
     except Exception:
+        logger.debug("git rev-parse failed", exc_info=True)
         return "unknown"
 
 
@@ -635,16 +1093,61 @@ def _new_report_id(audit_name: str = "") -> str:
 
 
 async def _stabilize_page(page: Any, network_idle_mode: str, execution_notes: List[str]) -> None:
+    if page is None or page.is_closed():
+        raise TargetClosedError("Page is closed; cannot stabilize")
     try:
         await page.wait_for_load_state("domcontentloaded", timeout=20000)
+    except TargetClosedError:
+        raise
     except Exception as exc:
         execution_notes.append("domcontentloaded wait failed: {}".format(exc))
     if network_idle_mode == "always":
         try:
             await page.wait_for_load_state("networkidle", timeout=15000)
+        except TargetClosedError:
+            raise
         except Exception as exc:
             execution_notes.append("networkidle wait failed: {}".format(exc))
     await asyncio.sleep(0.4)
+
+
+# CSS injected before screenshots to halt animations/transitions/scroll-behavior
+# so captured frames are not mid-animation. Combined with reduced-motion emulation
+# this gives a deterministic visual snapshot.
+_FREEZE_MOTION_CSS = (
+    "*, *::before, *::after {"
+    " animation-duration: 0s !important;"
+    " animation-delay: 0s !important;"
+    " animation-iteration-count: 1 !important;"
+    " animation-play-state: paused !important;"
+    " transition-duration: 0s !important;"
+    " transition-delay: 0s !important;"
+    " scroll-behavior: auto !important;"
+    " caret-color: transparent !important;"
+    "}"
+)
+
+
+async def _freeze_motion_for_screenshot(page: Any) -> None:
+    """Disable animations/transitions and wait for fonts + two RAFs so the next
+    screenshot lands on a settled frame. Best-effort; failures are swallowed."""
+    try:
+        await page.emulate_media(reduced_motion="reduce")
+    except Exception:
+        logger.warning("emulate_media(reduced_motion) failed", exc_info=True)
+    try:
+        await page.add_style_tag(content=_FREEZE_MOTION_CSS)
+    except Exception:
+        logger.warning("freeze-motion style tag injection failed", exc_info=True)
+    try:
+        await page.evaluate(
+            "() => Promise.all(["
+            " document.fonts && document.fonts.ready,"
+            " new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+            "])"
+        )
+    except Exception:
+        logger.warning("fonts.ready / RAF settle wait failed", exc_info=True)
 
 
 async def _create_shadow_page(page: Any, url: str, execution_notes: List[str]) -> Optional[Any]:
@@ -656,6 +1159,9 @@ async def _create_shadow_page(page: Any, url: str, execution_notes: List[str]) -
     Returns None if creation fails; the caller should then fall back to
     DOM-read-only checks on the original page.
     """
+    if page is None or page.is_closed():
+        execution_notes.append("Shadow page creation skipped: page already closed.")
+        return None
     try:
         shadow = await page.context.new_page()
         if url and url.startswith("http"):
@@ -672,22 +1178,33 @@ async def _create_shadow_page(page: Any, url: str, execution_notes: List[str]) -
 async def _collect_page_context(driver_state: Dict[str, Any]) -> Dict[str, Any]:
     page = driver_state.get("page")
     frame = driver_state.get("frame")
+
+    if page is None or page.is_closed():
+        raise TargetClosedError("Page is closed; cannot collect context")
+
     active_frame = None
     try:
         if frame is not None and frame != page.main_frame:
             active_frame = frame
     except Exception:
+        logger.debug("active frame detection failed", exc_info=True)
         active_frame = None
 
     page_url = page.url
     try:
         page_title = await page.title()
+    except TargetClosedError:
+        raise
     except Exception:
+        logger.warning("page.title() failed", exc_info=True)
         page_title = ""
 
     try:
         user_agent = await page.evaluate("() => navigator.userAgent")
+    except TargetClosedError:
+        raise
     except Exception:
+        logger.warning("user agent probe failed", exc_info=True)
         user_agent = "unknown"
 
     viewport = getattr(page, "viewport_size", None) or {}
@@ -696,6 +1213,7 @@ async def _collect_page_context(driver_state: Dict[str, Any]) -> Dict[str, Any]:
         try:
             frame_name = active_frame.name or None
         except Exception:
+            logger.debug("frame name lookup failed", exc_info=True)
             frame_name = None
 
     return {
@@ -795,10 +1313,11 @@ async def append_accessibility_audit_checkpoint(
         frame_name = context["frame_name"]
 
         try:
+            await _freeze_motion_for_screenshot(page)
             _ss_bytes = await page.screenshot(full_page=False, type="jpeg", quality=55)
             checkpoint_screenshot_b64 = base64.b64encode(_ss_bytes).decode()
         except Exception:
-            pass
+            logger.warning("checkpoint screenshot capture failed", exc_info=True)
 
         journey_name = session["audit_name"].strip() or "Accessibility audit"
         if frame_name:
@@ -844,66 +1363,62 @@ async def append_accessibility_audit_checkpoint(
     # shadow page is closed. If shadow page creation fails we fall back to the
     # original page with only DOM-read-only evaluators.
     shadow = await _create_shadow_page(page, page_url, session["execution_notes"])
-    eval_page = shadow if shadow is not None else page
-    _evaluator_names = (
-        "keyboard_smoke",
-        "focus_visibility",
-        "focus_appearance",
-        "form_labeling",
-        "hover_content",
-        "structure",
-        "live_region",
-        "viewport_reflow",
-        "text_resize",
-        "timing",
-        "pointer_target",
-        "orientation",
-        "motion_preference",
-        "media_alternatives",
-        "context_change",
-    )
-    try:
-        _evaluator_tasks = await asyncio.gather(
-            asyncio.wait_for(run_keyboard_smoke_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_focus_visibility_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_focus_appearance_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_form_labeling_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_hover_content_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_structure_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_live_region_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_viewport_reflow_evaluator(eval_page, session["viewport_profile"]), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_text_resize_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_timing_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_pointer_target_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_orientation_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_motion_preference_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_media_alternatives_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            asyncio.wait_for(run_context_change_evaluator(eval_page), timeout=_EVALUATOR_TIMEOUT_S),
-            return_exceptions=True,
+
+    if page.is_closed():
+        session["execution_notes"].append(
+            "Page closed before evaluators could run at step '{}'; checkpoint recorded without evaluation.".format(journey_step_label)
         )
-        for _eval_name, _eval_result in zip(_evaluator_names, _evaluator_tasks):
-            if isinstance(_eval_result, BaseException):
-                session["execution_notes"].append(
-                    "Evaluator '{}' raised an error: {}".format(_eval_name, _eval_result)
-                )
-                continue
-            custom_results.extend(
-                _apply_custom_check_results(
-                    criteria_by_id=session["criteria_by_id"],
-                    check_results=_eval_result,
-                    report_id=session["report_id"],
-                    page_url=page_url,
-                    page_title=page_title,
-                    journey_name=journey_name,
-                    journey_step_label=journey_step_label,
-                    journey_step_index=journey_step_index,
-                    frame_name=frame_name,
-                )
-            )
+        if shadow is not None:
+            try:
+                await shadow.close()
+            except Exception:
+                pass
+        checkpoint = {
+            "journey_step_index": journey_step_index,
+            "journey_step_label": journey_step_label,
+            "page_url": page_url,
+            "page_title": page_title,
+            "viewport": viewport,
+            "browser": _browser_label(user_agent),
+            "axe_status": "skipped",
+            "axe_violations_count": None,
+            "axe_snapshot": None,
+            "axe_report": None,
+            "screenshot": "data:image/jpeg;base64,{}".format(checkpoint_screenshot_b64) if checkpoint_screenshot_b64 else None,
+        }
+        session["journey_steps"].append(checkpoint)
+        return checkpoint
+
+    eval_page = shadow if shadow is not None else page
+    # wcag22aa profile excludes AAA-only criteria; skip evaluators bound to them.
+    _aaa_only_evaluators = {"focus_appearance", "motion_preference"}
+    _evaluator_specs = [
+        ("keyboard_smoke", run_keyboard_smoke_evaluator, ()),
+        ("focus_visibility", run_focus_visibility_evaluator, ()),
+        ("focus_appearance", run_focus_appearance_evaluator, ()),
+        ("form_labeling", run_form_labeling_evaluator, ()),
+        ("hover_content", run_hover_content_evaluator, ()),
+        ("structure", run_structure_evaluator, ()),
+        ("live_region", run_live_region_evaluator, ()),
+        ("viewport_reflow", run_viewport_reflow_evaluator, (session["viewport_profile"],)),
+        ("text_resize", run_text_resize_evaluator, ()),
+        ("timing", run_timing_evaluator, ()),
+        ("pointer_target", run_pointer_target_evaluator, ()),
+        ("orientation", run_orientation_evaluator, ()),
+        ("motion_preference", run_motion_preference_evaluator, ()),
+        ("media_alternatives", run_media_alternatives_evaluator, ()),
+        ("context_change", run_context_change_evaluator, ()),
+    ]
+    _evaluator_specs = [s for s in _evaluator_specs if s[0] not in _aaa_only_evaluators]
+    _evaluator_names = tuple(s[0] for s in _evaluator_specs)
+    try:
+        # Run axe + capture violation screenshots BEFORE evaluators mutate the
+        # shadow page (clicks, focus, viewport resize, CSS injection). Otherwise
+        # axe sees a randomly-mutated DOM and screenshots reflect that state
+        # (open menus, drawers, scrolled-away content) instead of the clean page.
         axe_payload = await asyncio.wait_for(
             run_axe_scan(
                 page=eval_page,
-                standard_profile=session["standard_profile"],
                 scope_selector=session["scope_selector"],
                 include_best_practices=session["include_best_practices"],
                 include_experimental=session["include_experimental"],
@@ -925,6 +1440,42 @@ async def append_accessibility_audit_checkpoint(
             axe_payload,
             rule_ids=None,
         )
+        _evaluator_tasks = await asyncio.gather(
+            *[asyncio.wait_for(fn(eval_page, *args), timeout=_EVALUATOR_TIMEOUT_S) for _, fn, args in _evaluator_specs],
+            return_exceptions=True,
+        )
+        # Gather raw check results first so screenshots can be attached BEFORE
+        # _apply_custom_check_results bakes screenshot_b64 into evidence.
+        _pending_checks: List[Dict[str, Any]] = []
+        for _eval_name, _eval_result in zip(_evaluator_names, _evaluator_tasks):
+            if isinstance(_eval_result, BaseException):
+                session["execution_notes"].append(
+                    "Evaluator '{}' raised an error: {}".format(_eval_name, _eval_result)
+                )
+                continue
+            _pending_checks.extend(_eval_result)
+        # Screenshot custom checks against the live (un-mutated) page so the
+        # capture reflects the checkpoint state, not the evaluator-mutated
+        # shadow DOM (clicks, focus, viewport resize, injected CSS).
+        try:
+            await _attach_custom_screenshots(page, _pending_checks)
+        except Exception as _ss_exc:
+            session["execution_notes"].append(
+                "Custom screenshot pass error at step '{}': {}".format(journey_step_label, _ss_exc)
+            )
+        custom_results.extend(
+            _apply_custom_check_results(
+                criteria_by_id=session["criteria_by_id"],
+                check_results=_pending_checks,
+                report_id=session["report_id"],
+                page_url=page_url,
+                page_title=page_title,
+                journey_name=journey_name,
+                journey_step_label=journey_step_label,
+                journey_step_index=journey_step_index,
+                frame_name=frame_name,
+            )
+        )
     except Exception as exc:
         session["execution_notes"].append(
             "Checkpoint evaluation error at step '{}': {}".format(journey_step_label, exc)
@@ -934,7 +1485,7 @@ async def append_accessibility_audit_checkpoint(
             try:
                 await shadow.close()
             except Exception:
-                pass
+                logger.warning("shadow page close failed", exc_info=True)
     if axe_payload.get("status") == "unavailable":
         session["execution_notes"].append(axe_payload["error"])
     elif axe_payload.get("status") == "error":
@@ -988,11 +1539,27 @@ async def append_accessibility_audit_checkpoint(
 
 
 async def finalize_accessibility_audit_session(session: Dict[str, Any]) -> str:
-    context = await _collect_page_context(session["driver_state"])
+    try:
+        context = await _collect_page_context(session["driver_state"])
+    except Exception:
+        last_step = session["journey_steps"][-1] if session.get("journey_steps") else {}
+        context = {
+            "page_url": last_step.get("page_url", ""),
+            "page_title": last_step.get("page_title", ""),
+            "user_agent": "unknown",
+            "viewport": last_step.get("viewport", {}),
+            "frame_name": None,
+        }
     criteria = session["criteria"]
     for criterion in criteria:
         if criterion.outcome_status == OUTCOME_PASSED and not criterion.passed_checks:
             criterion.outcome_status = OUTCOME_NOT_TESTED
+            if not criterion.not_tested_explanation:
+                criterion.not_tested_explanation = (
+                    "No evidence collected in this run — automation did not produce a verifiable result."
+                )
+
+    _finalize_criterion_transparency(criteria)
 
     summary = _summary_from_criteria(criteria)
     sections = _build_sections(criteria)
@@ -1046,12 +1613,15 @@ async def finalize_accessibility_audit_session(session: Dict[str, Any]) -> str:
         criteria=criteria,
         raw_sources=session["raw_sources"],
         artifacts={},
+        evaluator_manifests=all_manifests(),
     )
 
     json_artifact_name = _persist_json_report(report)
     report.artifacts["json"] = json_artifact_name
     html_artifact_name = _persist_html_report(report)
     report.artifacts["html"] = html_artifact_name
+    summary_artifact_name = _persist_stakeholder_summary(report, html_artifact_name)
+    report.artifacts["stakeholder_summary"] = summary_artifact_name
     digest_artifact_name = _persist_digest_report(report)
     report.artifacts["digest"] = digest_artifact_name
     _persist_json_report(report)

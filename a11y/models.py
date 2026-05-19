@@ -8,7 +8,6 @@ COVERAGE_AUTOMATED = "AUTOMATED"
 COVERAGE_SEMI_AUTOMATED = "SEMI_AUTOMATED"
 COVERAGE_MANUAL_REQUIRED = "MANUAL_REQUIRED"
 COVERAGE_NOT_TESTED = "NOT_TESTED"
-COVERAGE_NOT_APPLICABLE = "NOT_APPLICABLE"
 
 OUTCOME_PASSED = "PASSED"
 OUTCOME_FAILED = "FAILED"
@@ -16,6 +15,13 @@ OUTCOME_NEEDS_REVIEW = "NEEDS_REVIEW"
 OUTCOME_NOT_TESTED = "NOT_TESTED"
 OUTCOME_NOT_APPLICABLE = "NOT_APPLICABLE"
 OUTCOME_ERROR = "ERROR"
+
+# Pass-rationale tags. Populated only when outcome_status == PASSED.
+PASS_RATIONALE_ALL_CHECKED_CLEAN = "all_checked_clean"      # every applicable element verified
+PASS_RATIONALE_NO_APPLICABLE = "no_applicable_elements"     # nothing on the page matched the rule scope
+PASS_RATIONALE_AXE_RULE_CLEAN = "axe_rule_clean"            # axe rule fired and reported only passes
+PASS_RATIONALE_HEURISTIC_PROXY = "heuristic_proxy"          # custom evaluator probed a sample, no failure
+PASS_RATIONALE_LIMITATION_PASS = "limitation_pass"          # axe ran but incomplete checks dominate
 
 KIND_SUCCESS_CRITERION = "success_criterion"
 KIND_CONFORMANCE_REQUIREMENT = "conformance_requirement"
@@ -68,6 +74,25 @@ class EvidenceItem:
 
 
 @dataclass
+class EvaluatorManifest:
+    """Self-description of one evaluator (axe block or custom evaluator).
+
+    Lives next to the probing logic so methodology cannot drift from code.
+    Aggregated into reports so stakeholders see what was tested and where
+    automation stops, per criterion.
+    """
+    id: str                                  # e.g. "custom:hover_content" or "axe:wcag-1.4.13"
+    name: str                                # human-readable label
+    criteria: List[str]                      # WCAG criterion IDs covered
+    coverage_mode: str                       # AUTOMATED / SEMI_AUTOMATED
+    what_tested: List[str] = field(default_factory=list)
+    what_not_tested: List[str] = field(default_factory=list)
+    sampling: Optional[str] = None           # e.g. "first 3 candidate triggers per checkpoint"
+    automation_limits: List[str] = field(default_factory=list)
+    manual_followup: List[str] = field(default_factory=list)
+
+
+@dataclass
 class CriterionResult:
     id: str
     kind: str
@@ -89,6 +114,12 @@ class CriterionResult:
     incomplete_checks: List[Dict[str, Any]] = field(default_factory=list)
     not_tested_explanation: str = ""
     run_history_summary: Dict[str, Any] = field(default_factory=dict)
+    # Transparency layer — populated during aggregation in runner.py.
+    pass_rationale: Optional[str] = None
+    tested_aspects: List[str] = field(default_factory=list)
+    untested_aspects: List[str] = field(default_factory=list)
+    automation_limits: List[str] = field(default_factory=list)
+    manifest_refs: List[str] = field(default_factory=list)
 
     def add_source(self, source: str) -> None:
         if source not in self.sources:
@@ -119,6 +150,7 @@ class AccessibilityReport:
     criteria: List[CriterionResult]
     raw_sources: Dict[str, Any]
     artifacts: Dict[str, Any]
+    evaluator_manifests: List[EvaluatorManifest] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

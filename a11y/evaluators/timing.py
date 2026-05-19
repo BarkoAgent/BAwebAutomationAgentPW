@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Dict, List
 
 from ..models import COVERAGE_AUTOMATED, COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW, OUTCOME_PASSED
+
+logger = logging.getLogger(__name__)
 
 
 # WCAG 2.2.1: Timing Adjustable — user can extend/disable time limits
@@ -102,6 +105,39 @@ INTERVAL_INTERCEPT_SCRIPT = """
 GET_INTERVAL_COUNT_SCRIPT = "() => window.__a11yIntervalCount || 0"
 
 
+# Captures per-carousel state fingerprint (active slide index, inner-track
+# transform, scrollLeft, and aria-current). Polled twice across an interval
+# so we only flag carousels that actually auto-advance.
+CAROUSEL_FINGERPRINT_SCRIPT = """
+(locators) => {
+  function findByPath(path) {
+    if (!path) return null;
+    if (path.startsWith('#')) return document.getElementById(path.slice(1));
+    try { return document.querySelector(path); } catch (e) { return null; }
+  }
+  function fingerprint(el) {
+    if (!el) return '';
+    const parts = [];
+    const active = el.querySelector('[aria-current="true"], .is-active, .active, .swiper-slide-active, .slick-active, .owl-item.active');
+    if (active) {
+      const idx = Array.prototype.indexOf.call(active.parentElement ? active.parentElement.children : [], active);
+      parts.push('active:' + idx);
+    }
+    // Inner-track transform (Swiper / Slick / generic)
+    const track = el.querySelector('.swiper-wrapper, .slick-track, [class*="track"], [class*="slides"]');
+    if (track) {
+      const t = window.getComputedStyle(track).transform || '';
+      parts.push('t:' + t);
+      parts.push('sl:' + Math.round(track.scrollLeft || 0));
+    }
+    parts.push('elsl:' + Math.round(el.scrollLeft || 0));
+    return parts.join('|');
+  }
+  return locators.map(loc => fingerprint(findByPath(loc)));
+}
+"""
+
+
 async def run_timing_evaluator(page: Any) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
 
@@ -112,10 +148,35 @@ async def run_timing_evaluator(page: Any) -> List[Dict[str, Any]]:
         interval_count = await page.evaluate(GET_INTERVAL_COUNT_SCRIPT)
         timing_data = await page.evaluate(TIMING_SCAN_SCRIPT)
     except Exception:
+        logger.warning("timing: interval intercept / timing scan failed", exc_info=True)
         interval_count = 0
         timing_data = {"carousels": [], "timerElements": [], "autoUpdating": [], "marquees": []}
 
     carousels = timing_data.get("carousels", [])
+
+    # Confirm auto-advance by polling each detected carousel's slide-state
+    # fingerprint across an interval. Only carousels whose fingerprint changes
+    # without user interaction are treated as actually auto-advancing.
+    auto_advancing_locators: set = set()
+    if carousels:
+        try:
+            locators = [c.get("locator", "") for c in carousels]
+            fp_before = await page.evaluate(CAROUSEL_FINGERPRINT_SCRIPT, locators)
+            await asyncio.sleep(1.6)
+            fp_after = await page.evaluate(CAROUSEL_FINGERPRINT_SCRIPT, locators)
+            for i, loc in enumerate(locators):
+                before = fp_before[i] if i < len(fp_before) else ""
+                after = fp_after[i] if i < len(fp_after) else ""
+                if before and after and before != after:
+                    auto_advancing_locators.add(loc)
+            for c in carousels:
+                c["autoAdvancing"] = c.get("locator", "") in auto_advancing_locators
+        except Exception:
+            logger.warning("timing: carousel auto-advance fingerprint probe failed", exc_info=True)
+            for c in carousels:
+                c["autoAdvancing"] = None
+    # A static carousel (no auto-advance observed) is not a 2.2.2 issue.
+    carousels = [c for c in carousels if c.get("autoAdvancing") is not False]
     timer_elements = timing_data.get("timerElements", [])
     auto_updating = timing_data.get("autoUpdating", [])
     marquees = timing_data.get("marquees", [])

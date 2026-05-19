@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Dict, List
 
 from ..models import COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW, OUTCOME_PASSED
+
+logger = logging.getLogger(__name__)
 
 
 # WCAG 3.2.1: On Focus — receiving focus must not initiate a change of context
@@ -127,6 +130,7 @@ async def run_context_change_evaluator(page: Any) -> List[Dict[str, Any]]:
     try:
         candidates = await page.evaluate(FOCUSABLE_INPUTS_SCRIPT)
     except Exception:
+        logger.warning("context_change: focusable/input candidate scan failed", exc_info=True)
         candidates = {"focusCandidates": [], "inputCandidates": []}
 
     focus_candidates = candidates.get("focusCandidates", [])
@@ -171,9 +175,9 @@ async def run_context_change_evaluator(page: Any) -> List[Dict[str, Any]]:
                         await page.go_back()
                         await asyncio.sleep(0.5)
                     except Exception:
-                        pass
+                        logger.warning("context_change: go_back after focus-triggered nav failed", exc_info=True)
         except Exception:
-            pass
+            logger.warning("context_change: focus probe failed for %s", candidate.get("locator"), exc_info=True)
 
     # --- 3.2.2: Test input change on selects/checkboxes ---
     for candidate in input_candidates[:3]:
@@ -232,9 +236,9 @@ async def run_context_change_evaluator(page: Any) -> List[Dict[str, Any]]:
                         await page.go_back()
                         await asyncio.sleep(0.5)
                     except Exception:
-                        pass
+                        logger.warning("context_change: go_back after input-triggered nav failed", exc_info=True)
         except Exception:
-            pass
+            logger.warning("context_change: input probe failed for %s", candidate.get("locator"), exc_info=True)
 
     # --- Report 3.2.1 ---
     if focus_violations:
