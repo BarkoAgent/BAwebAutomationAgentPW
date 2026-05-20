@@ -289,28 +289,28 @@ async def get_last_accessibility_report(_run_test_id: str = "1") -> str:
     return _get_last(_run_test_id=_run_test_id)
 
 
-async def list_accessibility_reports(_run_test_id: str = "1") -> str:
+async def list_accessibility_reports(project_id: str = "", _run_test_id: str = "1") -> str:
     """Returns the list of persisted accessibility report artifacts."""
     if not _A11Y_AVAILABLE:
         return _a11y_unavailable()
     from a11y.runner import list_accessibility_reports_json as _list_reports
-    return _list_reports(_run_test_id=_run_test_id)
+    return _list_reports(project_id=project_id, _run_test_id=_run_test_id)
 
 
-async def get_accessibility_report(report_id: str, _run_test_id: str = "1") -> str:
+async def get_accessibility_report(report_id: str, project_id: str = "", _run_test_id: str = "1") -> str:
     """Returns the full persisted JSON for a specific accessibility report id."""
     if not _A11Y_AVAILABLE:
         return _a11y_unavailable()
     from a11y.runner import get_accessibility_report_json as _get_report
-    return _get_report(report_id=report_id, _run_test_id=_run_test_id)
+    return _get_report(report_id=report_id, project_id=project_id, _run_test_id=_run_test_id)
 
 
-async def export_accessibility_report(report_id: str, format: str = "json", _run_test_id: str = "1") -> str:
+async def export_accessibility_report(report_id: str, format: str = "json", project_id: str = "", _run_test_id: str = "1") -> str:
     """Returns a specific persisted accessibility report artifact by report id and format."""
     if not _A11Y_AVAILABLE:
         return _a11y_unavailable()
     from a11y.runner import export_accessibility_report_json as _export_report
-    return _export_report(report_id=report_id, format=format, _run_test_id=_run_test_id)
+    return _export_report(report_id=report_id, format=format, project_id=project_id, _run_test_id=_run_test_id)
 
 
 async def run_accessibility_test_case(

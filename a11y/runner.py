@@ -1006,7 +1006,7 @@ def _summary_from_criteria(criteria: List[CriterionResult]) -> Dict[str, Any]:
     }
 
 
-def _report_storage_dir() -> Path:
+def _report_storage_dir(project_id: str = "") -> Path:
     reports_dir = Path(os.getenv("A11Y_REPORTS_DIR", "./a11y_reports")).resolve()
     reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1024,27 +1024,35 @@ def _report_storage_dir() -> Path:
                 logger.warning("legacy attachments migration failed for %s", legacy_path, exc_info=True)
                 continue
 
+    if project_id:
+        project_dir = reports_dir / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        return project_dir
+
     return reports_dir
 
 
-def _artifact_path(report_id: str, suffix: str) -> Path:
-    return _report_storage_dir() / "{}.{}".format(report_id, suffix)
+def _artifact_path(report_id: str, suffix: str, project_id: str = "") -> Path:
+    return _report_storage_dir(project_id) / "{}.{}".format(report_id, suffix)
 
 
 def _persist_json_report(report: AccessibilityReport) -> str:
-    path = _artifact_path(report.report_meta["report_id"], "json")
+    project_id = report.report_meta.get("project_id", "")
+    path = _artifact_path(report.report_meta["report_id"], "json", project_id)
     path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
     return path.name
 
 
 def _persist_html_report(report: AccessibilityReport) -> str:
-    path = _artifact_path(report.report_meta["report_id"], "html")
+    project_id = report.report_meta.get("project_id", "")
+    path = _artifact_path(report.report_meta["report_id"], "html", project_id)
     path.write_text(render_html_report(report.to_dict()), encoding="utf-8")
     return path.name
 
 
 def _persist_stakeholder_summary(report: AccessibilityReport, detail_html_name: str) -> str:
-    path = _report_storage_dir() / "{}_summary.html".format(report.report_meta["report_id"])
+    project_id = report.report_meta.get("project_id", "")
+    path = _report_storage_dir(project_id) / "{}_summary.html".format(report.report_meta["report_id"])
     path.write_text(
         render_stakeholder_summary(report.to_dict(), detail_artifact=detail_html_name),
         encoding="utf-8",
@@ -1053,7 +1061,8 @@ def _persist_stakeholder_summary(report: AccessibilityReport, detail_html_name: 
 
 
 def _persist_digest_report(report: AccessibilityReport) -> str:
-    path = _artifact_path(report.report_meta["report_id"] + "_digest", "json")
+    project_id = report.report_meta.get("project_id", "")
+    path = _artifact_path(report.report_meta["report_id"] + "_digest", "json", project_id)
     path.write_text(build_digest_json(report.to_dict()), encoding="utf-8")
     return path.name
 
@@ -1247,12 +1256,14 @@ def _create_session(
     axe_result_types: str,
     axe_reporter: str,
     _run_test_id: str,
+    project_id: str = "",
 ) -> Dict[str, Any]:
     criteria = [_criterion_result_from_definition(row) for row in build_registry()]
     return {
         "driver_state": driver_state,
         "report_id": _new_report_id(audit_name),
         "audit_name": audit_name,
+        "project_id": project_id,
         "standard_profile": standard_profile,
         "scope_selector": scope_selector,
         "include_best_practices": _parse_bool(include_best_practices, True),
@@ -1574,6 +1585,7 @@ async def finalize_accessibility_audit_session(session: Dict[str, Any]) -> str:
             "browser": browser,
             "viewport": context["viewport"],
             "standard_profile": session["standard_profile"],
+            "project_id": session.get("project_id", ""),
             "tool_versions": {
                 "runner": "phase-3-scenario",
                 "axe_wrapper": "optional",
@@ -1664,6 +1676,7 @@ async def run_accessibility_audit_for_driver(
     axe_result_types: str = "",
     axe_reporter: str = "v2",
     _run_test_id: str = "1",
+    project_id: str = "",
 ) -> str:
     page = driver_state.get("page")
     if page is None:
@@ -1689,30 +1702,44 @@ async def run_accessibility_audit_for_driver(
         axe_result_types=axe_result_types,
         axe_reporter=axe_reporter,
         _run_test_id=_run_test_id,
+        project_id=project_id,
     )
     await append_accessibility_audit_checkpoint(session, "Run accessibility audit", 1)
     return await finalize_accessibility_audit_session(session)
 
 
-def _list_report_files() -> List[Path]:
-    attachments_dir = _report_storage_dir()
-    return sorted(attachments_dir.glob("a11y_*.json"), reverse=True)
+def _list_report_files(project_id: str = "") -> List[Path]:
+    base = _report_storage_dir()
+    if project_id:
+        proj_dir = base / project_id
+        if proj_dir.is_dir():
+            return sorted(
+                (p for p in proj_dir.glob("a11y_*.json") if not p.name.endswith("_digest.json")),
+                reverse=True,
+            )
+        return []
+    return sorted(
+        (p for p in base.glob("a11y_*.json") if not p.name.endswith("_digest.json")),
+        reverse=True,
+    )
 
 
-def _report_json_path(report_id: str) -> Path:
-    return _artifact_path(report_id, "json")
+def _report_json_path(report_id: str, project_id: str = "") -> Path:
+    return _artifact_path(report_id, "json", project_id)
 
 
-def _load_report_payload(report_id: str) -> Dict[str, Any]:
-    path = _report_json_path(report_id)
+def _load_report_payload(report_id: str, project_id: str = "") -> Dict[str, Any]:
+    path = _report_json_path(report_id, project_id)
+    if not path.is_file() and project_id:
+        path = _report_json_path(report_id, "")
     if not path.is_file():
         raise FileNotFoundError("Accessibility report not found: {}".format(report_id))
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def list_accessibility_reports_json(_run_test_id: str = "1") -> str:
+def list_accessibility_reports_json(project_id: str = "", _run_test_id: str = "1") -> str:
     reports: List[Dict[str, Any]] = []
-    for path in _list_report_files():
+    for path in _list_report_files(project_id):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -1737,9 +1764,9 @@ def list_accessibility_reports_json(_run_test_id: str = "1") -> str:
     return json.dumps(reports)
 
 
-def get_accessibility_report_json(report_id: str, _run_test_id: str = "1") -> str:
+def get_accessibility_report_json(report_id: str, project_id: str = "", _run_test_id: str = "1") -> str:
     try:
-        payload = _load_report_payload(report_id)
+        payload = _load_report_payload(report_id, project_id)
     except FileNotFoundError as exc:
         return json.dumps({"status": "error", "error": str(exc), "report_id": report_id})
     except Exception as exc:
@@ -1747,7 +1774,7 @@ def get_accessibility_report_json(report_id: str, _run_test_id: str = "1") -> st
     return json.dumps(payload)
 
 
-def export_accessibility_report_json(report_id: str, format: str = "json", _run_test_id: str = "1") -> str:
+def export_accessibility_report_json(report_id: str, format: str = "json", project_id: str = "", _run_test_id: str = "1") -> str:
     requested_format = (format or "json").strip().lower()
     if requested_format not in {"json", "html", "excel", "pdf"}:
         return json.dumps({
@@ -1757,12 +1784,13 @@ def export_accessibility_report_json(report_id: str, format: str = "json", _run_
         })
 
     try:
-        payload = _load_report_payload(report_id)
+        payload = _load_report_payload(report_id, project_id)
     except FileNotFoundError as exc:
         return json.dumps({"status": "error", "error": str(exc), "report_id": report_id})
     except Exception as exc:
         return json.dumps({"status": "error", "error": str(exc), "report_id": report_id})
 
+    _proj_id = payload.get("report_meta", {}).get("project_id", "") or project_id
     artifacts = payload.get("artifacts", {})
     file_name = artifacts.get(requested_format)
 
@@ -1776,12 +1804,12 @@ def export_accessibility_report_json(report_id: str, format: str = "json", _run_
         })
 
     if requested_format == "html":
-        artifact_path = _artifact_path(report_id, "html")
+        artifact_path = _artifact_path(report_id, "html", _proj_id)
         content = render_html_report(payload)
         artifact_path.write_text(content, encoding="utf-8")
         file_name = file_name or artifact_path.name
     else:
-        artifact_path = _artifact_path(report_id, "json")
+        artifact_path = _artifact_path(report_id, "json", _proj_id)
         content = json.dumps(payload)
         file_name = file_name or artifact_path.name
         if not artifact_path.is_file():
