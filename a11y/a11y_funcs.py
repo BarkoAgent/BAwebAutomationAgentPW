@@ -14,6 +14,7 @@ import os
 import json
 import logging
 from urllib.parse import urlparse
+from typing import Optional
 
 try:
     from ba_ws_sdk import streaming as _streaming
@@ -177,7 +178,7 @@ def _summarize_step_result(
     action: str,
     args: dict,
     result: object = None,
-    error: str | None = None,
+    error: Optional[str] = None,
 ) -> tuple[str, dict]:
     target = _short_text(_step_target(action, args), 100)
     metadata: dict = {}
