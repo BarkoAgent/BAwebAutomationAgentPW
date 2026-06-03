@@ -4,23 +4,317 @@ import json
 import time
 import asyncio
 import logging
+import threading
 
 import ba_ws_sdk.streaming as streaming
 import ba_ws_sdk.file_system as file_system
-from dotenv import load_dotenv
+from dotenv import load_dotenv as _load_dotenv
 from playwright.async_api import async_playwright
-load_dotenv()
+_load_dotenv()
 
-DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "10"))  # seconds; Playwright expects ms
+DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "3"))  # seconds; Playwright expects ms
 
+test_timeout: dict[str, int] = {}
 test_variables = {}
 driver: dict[str, object] = {}
 run_test_id = ""
 
+# ─── OCR (EasyOCR) configuration ─────────────────────────────────────────────
+# Languages the OCR reader recognises (comma-separated, e.g. "en,es").
+OCR_LANGUAGES = [l.strip() for l in os.getenv("OCR_LANGUAGES", "en").split(",") if l.strip()] or ["en"]
+# Minimum EasyOCR confidence (0-1) for a detection to be considered a match.
+try:
+    OCR_MIN_CONFIDENCE = float(os.getenv("OCR_MIN_CONFIDENCE", "0.3"))
+except ValueError:
+    OCR_MIN_CONFIDENCE = 0.3
 
-def clean_html(html_content):
-    for tag in ['script', 'style', 'svg']:
+_ocr_reader = None  # Lazily/eagerly constructed easyocr.Reader singleton
+
+
+def _init_ocr_reader():
+    """
+    Construct the (heavy) EasyOCR reader once and cache it as a module-level
+    singleton. Called eagerly at agent startup via a background warmup thread so
+    the first OCR action does not pay the model-load cost, and again as a
+    fallback from _get_ocr_reader() if warmup hasn't finished. Never raises —
+    on failure it logs and leaves the reader as None.
+    """
+    global _ocr_reader
+    if _ocr_reader is not None:
+        return _ocr_reader
+    try:
+        import easyocr  # heavy import (pulls in torch); kept local on purpose
+        logging.info(f"Loading EasyOCR reader (languages={OCR_LANGUAGES})...")
+        _ocr_reader = easyocr.Reader(OCR_LANGUAGES, gpu=True)
+        logging.info("EasyOCR reader loaded.")
+    except Exception as e:
+        logging.error(f"Failed to initialize EasyOCR reader: {e}")
+        _ocr_reader = None
+    return _ocr_reader
+
+
+def _get_ocr_reader():
+    """Return the cached EasyOCR reader, building it synchronously if needed."""
+    if _ocr_reader is None:
+        return _init_ocr_reader()
+    return _ocr_reader
+
+
+async def _ocr_screenshot_bytes(page) -> bytes:
+    """
+    Capture a viewport screenshot for OCR. Prefers scale="css" (one pixel per CSS
+    pixel) when available; the caller (_ocr_detect) rescales coordinates from the
+    actual image size to the CSS viewport regardless, so the fallback is safe too.
+    """
+    try:
+        return await page.screenshot(scale="css")
+    except TypeError:
+        # Older Playwright builds don't support the `scale` kwarg.
+        return await page.screenshot()
+
+
+async def _ocr_detect(page):
+    """
+    Screenshot the viewport, run EasyOCR, and return every detection as a list of
+    {"text", "confidence", "x", "y"} dicts where (x, y) is the box center in CSS /
+    page coordinates.
+
+    Retina / HiDPI safe: the screenshot may be captured at a device scale factor
+    (e.g. 2x on Retina, or whenever `scale="css"` is unavailable), which makes the
+    image larger than the CSS viewport. EasyOCR returns coordinates in image
+    pixels, but page.mouse.click() expects CSS pixels — so we measure the ratio
+    between the actual image size and the CSS viewport and rescale accordingly.
+    """
+    reader = _get_ocr_reader()
+    if reader is None:
+        raise RuntimeError(
+            "EasyOCR is not available. Ensure 'easyocr' is installed in the agent environment."
+        )
+    png_bytes = await _ocr_screenshot_bytes(page)
+    viewport = page.viewport_size or {}
+
+    def _run():
+        from io import BytesIO
+        from PIL import Image  # provided transitively by easyocr (Pillow)
+
+        with BytesIO(png_bytes) as buf:
+            img_w, img_h = Image.open(buf).size
+
+        # image pixels -> CSS pixels. 1.0 when scale="css" (image == viewport),
+        # 0.5 on a 2x Retina/HiDPI capture (image is twice the viewport), etc.
+        vp_w = viewport.get("width")
+        vp_h = viewport.get("height")
+        scale_x = (vp_w / img_w) if (vp_w and img_w) else 1.0
+        scale_y = (vp_h / img_h) if (vp_h and img_h) else 1.0
+
+        items = []
+        for bbox, detected, conf in reader.readtext(png_bytes, canvas_size=1000):
+            if conf < OCR_MIN_CONFIDENCE:
+                continue
+            xs = [float(p[0]) for p in bbox]
+            ys = [float(p[1]) for p in bbox]
+            items.append({
+                "text": detected,
+                "confidence": float(conf),
+                "x": (sum(xs) / len(xs)) * scale_x,
+                "y": (sum(ys) / len(ys)) * scale_y,
+            })
+        return items
+
+    return await asyncio.to_thread(_run)
+
+
+async def _ocr_find_matches(page, text: str, match: str):
+    """
+    Return OCR detections matching `text` (center coords in CSS / page pixels).
+    `match` is 'contains' (default, case-insensitive substring) or 'exact'
+    (case-insensitive full match).
+    """
+    target = (text or "").strip().lower()
+    matches = []
+    for item in await _ocr_detect(page):
+        d = (item["text"] or "").strip().lower()
+        hit = (target in d) if match != "exact" else (d == target)
+        if hit:
+            matches.append(item)
+    return matches
+
+
+async def _ocr_wait_for_match(page, text: str, match: str, _run_test_id: str):
+    """
+    Poll OCR until the text is found or the default timeout elapses. Returns the
+    list of matches on success; raises TimeoutError if nothing matches in time
+    (mirrors how the locator-based methods rely on wait_for_selector's timeout).
+    """
+    deadline = time.time() + test_timeout[_run_test_id]
+    while True:
+        matches = await _ocr_find_matches(page, text, match)
+        if matches:
+            return matches
+        if time.time() >= deadline:
+            raise TimeoutError(
+                f"OCR did not find text '{text}' within {test_timeout[_run_test_id]}s"
+            )
+        await asyncio.sleep(0.5)
+
+
+def _warmup_ocr_reader():
+    """Start a daemon thread at import time so the reader loads at agent startup."""
+    threading.Thread(target=_init_ocr_reader, daemon=True, name="ocr-warmup").start()
+
+
+def set_default_timeout(timeout: str, _run_test_id='1'):
+    """
+    Sets the default timeout in seconds for Playwright actions (default is 3 seconds). This can be called from the agent's test plan to adjust timeouts dynamically.
+
+    Args:
+        timeout: Timeout in seconds (can be passed as a string from the test plan)
+    """
+    global DEFAULT_TIMEOUT
+    try:
+        if int(timeout) > 30:
+            logging.warning(f"Specified timeout {timeout}s is quite high and may lead to long waits. Will default to 30s if value is invalid.")
+            test_timeout[_run_test_id] = int(30)
+        else:
+            test_timeout[_run_test_id] = int(timeout)
+        logging.info(f"Default timeout set to {test_timeout[_run_test_id]} seconds.")
+    except ValueError:
+        logging.error(f"Invalid timeout value: '{timeout}'. Must be an integer representing seconds.")
+
+# Max characters get_page_html will return (across all frames); the rest is truncated.
+GET_PAGE_HTML_MAX_CHARS = int(os.getenv("GET_PAGE_HTML_MAX_CHARS", "40000"))
+# Per-frame char budget when aggregating multiple frames (defaults to the overall cap).
+GET_PAGE_HTML_PER_FRAME_MAX_CHARS = int(
+    os.getenv("GET_PAGE_HTML_PER_FRAME_MAX_CHARS", str(GET_PAGE_HTML_MAX_CHARS))
+)
+# Safety cap on how many frames get_page_html will read (Fiori can spawn many).
+GET_PAGE_HTML_MAX_FRAMES = int(os.getenv("GET_PAGE_HTML_MAX_FRAMES", "12"))
+
+# In-browser DOM pruner. Frameworks like SAP UI5 / Fiori emit enormous DOMs that
+# are mostly inline styles, data-sap-ui-* attributes, SVG icons and wrapper divs.
+# This clones the DOM, drops noise tags, and strips every attribute that isn't
+# useful for locating/interacting with an element — keeping the HTML structure
+# the agent needs while cutting size dramatically. Runs in the page, not on a
+# giant string in Python.
+_PRUNE_DOM_JS = r"""
+() => {
+  const ALLOWED = new Set(['id','name','class','type','role','href','src','alt',
+    'title','value','placeholder','for','label','checked','selected','disabled',
+    'readonly','required','tabindex','aria-label','aria-labelledby',
+    'aria-describedby','aria-hidden','aria-expanded','aria-checked',
+    'aria-selected','aria-current','data-testid']);
+  // Attributes whose values are useful as locators and must not be truncated.
+  const NO_TRUNC = new Set(['id','name','class','for','aria-label','aria-labelledby']);
+  const DROP = 'script,style,svg,noscript,link,meta,head,template,base,iframe';
+  const root = (document.body || document.documentElement).cloneNode(true);
+  root.querySelectorAll(DROP).forEach(n => n.remove());
+  const walk = (el) => {
+    if (el.attributes) {
+      for (const a of Array.from(el.attributes)) {
+        const n = a.name.toLowerCase();
+        if (!ALLOWED.has(n)) { el.removeAttribute(a.name); continue; }
+        const v = a.value || '';
+        if ((n === 'src' || n === 'href') && v.startsWith('data:')) {
+          el.setAttribute(a.name, 'data:[omitted]');
+        } else if (!NO_TRUNC.has(n) && v.length > 200) {
+          el.setAttribute(a.name, v.slice(0, 200) + '…');
+        }
+      }
+    }
+    for (const c of Array.from(el.children)) walk(c);
+  };
+  walk(root);
+  return root.outerHTML;
+}
+"""
+
+
+async def _get_pruned_or_full_html(target) -> str:
+    """
+    Return the attribute-pruned DOM for a Page or Frame, falling back to full
+    content on JS error. Both Page and Frame expose .evaluate() and .content().
+    """
+    try:
+        html = await target.evaluate(_PRUNE_DOM_JS)
+        if html:
+            return html
+    except Exception as e:
+        # A navigation race will re-raise from .content() below and trigger the
+        # caller's retry loop; a benign JS error just falls back to full HTML.
+        logging.warning(f"[get_page_html] DOM prune failed ({e}); using full content")
+    return await target.content()
+
+
+async def _collect_frame_html(page, active_frame=None) -> str:
+    """
+    Frame-aware HTML reader. Returns the pruned/cleaned DOM of the *primary*
+    frame first (the frame the agent switched into via change_frame_*, else the
+    main frame), then appends the content of every other non-empty frame on the
+    page (e.g. SAP Fiori apps that render inside an iframe). This keeps the DOM
+    aligned with what is actually painted on screen — the top document alone
+    often only shows the launchpad shell ("My Home") while the real app lives in
+    a child frame.
+    """
+    primary = active_frame or page.main_frame
+
+    parts = []
+    primary_html = _clean_html(
+        await _get_pruned_or_full_html(primary),
+        max_chars=GET_PAGE_HTML_PER_FRAME_MAX_CHARS,
+    )
+    parts.append(primary_html)
+
+    frames_read = 1
+    for fr in page.frames:
+        if frames_read >= GET_PAGE_HTML_MAX_FRAMES:
+            parts.append("<!-- …additional frames omitted (GET_PAGE_HTML_MAX_FRAMES reached) -->")
+            break
+        if fr is primary:
+            continue
+        try:
+            url = fr.url or ""
+        except Exception:
+            url = ""
+        if not url or url == "about:blank":
+            continue
+        try:
+            fr_html = _clean_html(
+                await _get_pruned_or_full_html(fr),
+                max_chars=GET_PAGE_HTML_PER_FRAME_MAX_CHARS,
+            )
+        except Exception as e:
+            logging.warning(f"[get_page_html] failed reading frame {url}: {e}")
+            continue
+        # Skip frames with no meaningful content (empty bodies, spacers, etc.).
+        if fr_html and len(fr_html) > 60:
+            name = fr.name or ""
+            parts.append(f"<!-- IFRAME name={name!r} url={url!r} -->\n{fr_html}")
+            frames_read += 1
+
+    combined = "\n".join(parts)
+    if len(combined) > GET_PAGE_HTML_MAX_CHARS:
+        combined = (
+            combined[:GET_PAGE_HTML_MAX_CHARS]
+            + "\n<!-- …truncated (multiple frames). Switch into the relevant frame "
+              "with change_frame_by_locator to get its full DOM. -->"
+        )
+    return combined
+
+
+def _clean_html(html_content, max_chars=None):
+    for tag in ['script', 'style', 'svg', 'noscript']:
         html_content = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html_content, flags=re.DOTALL)
+    html_content = re.sub(r'<!--.*?-->', '', html_content, flags=re.DOTALL)  # HTML comments
+    html_content = re.sub(r'>\s+<', '><', html_content)                       # whitespace between tags
+    html_content = re.sub(r'[ \t]{2,}', ' ', html_content)                    # runs of spaces/tabs
+    html_content = html_content.strip()
+    if max_chars and len(html_content) > max_chars:
+        total = len(html_content)
+        html_content = (
+            html_content[:max_chars]
+            + f"\n<!-- …truncated ({total} chars total). Narrow your target with a more "
+              "specific locator, or use get_all_text_elements for on-screen text. -->"
+        )
     return html_content
 
 async def stop_all_drivers(**kwargs):
@@ -45,13 +339,16 @@ async def create_driver(_run_test_id='1'):
     """
     Creates a Playwright browser context and initializes test_variables for this run id.
     """
-    global driver, test_variables
+    global driver, test_variables, test_timeout
+    test_timeout[_run_test_id] = DEFAULT_TIMEOUT
     test_variables[_run_test_id] = {}
+    await stop_all_drivers()
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=True)
     context = await browser.new_context(
         viewport={'width': 800, 'height': 800},
         accept_downloads=True,
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.4472.124 Safari/537.36",
     )
     page = await context.new_page()
 
@@ -176,9 +473,9 @@ async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     if use_vars == 'true' and _run_test_id in test_variables:
         value = test_variables[_run_test_id].get(value, value)
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     await page.fill(locator, value)
-    return "sent keys"
+    return value
 
 async def exists(locator: str, _run_test_id='1') -> str:
     """
@@ -186,7 +483,7 @@ async def exists(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     return "exists"
 
 async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false') -> str:
@@ -198,7 +495,7 @@ async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false')
     if use_vars == 'true' and _run_test_id in test_variables:
         text = test_variables[_run_test_id].get(text, text)
     locator = f"text={text}"
-    await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, timeout=test_timeout[_run_test_id] * 1000)
     return "exists (text)"
 
 async def does_not_exist(locator: str, _run_test_id='1') -> str:
@@ -207,7 +504,7 @@ async def does_not_exist(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state='detached', timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state='detached', timeout=test_timeout[_run_test_id] * 1000)
     return "doesn't exists"
 
 async def scroll_to_element(locator: str, _run_test_id='1') -> str:
@@ -216,7 +513,7 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, timeout=test_timeout[_run_test_id] * 1000)
     await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
     return "scrolled"
 
@@ -236,7 +533,7 @@ async def click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     await page.click(locator)
     return "clicked successfully on the element"
 
@@ -246,7 +543,7 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     await page.dblclick(locator)
     return "double clicked"
 
@@ -256,9 +553,104 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     await page.click(locator, button='right')
     return "right clicked"
+
+async def click_text_ocr(text: str, _run_test_id='1', match: str = 'contains', occurrence: str = '1', use_vars: str = 'false') -> str:
+    """
+    Clicks on visible TEXT located via OCR (EasyOCR) rather than a DOM locator.
+
+    Use this as a fallback when text cannot be targeted with a normal CSS/XPath
+    locator — e.g. text baked into a <canvas>, an image, a PDF/WebGL viewer, or a
+    third-party widget with no stable selector. It screenshots the current page,
+    runs OCR, finds the matching text and clicks the center of its bounding box.
+
+    Notes:
+      - Only text currently visible in the viewport can be found. Call
+        scroll_to_element or scroll the page first if the text is off-screen.
+      - The click is positional (page coordinates), so it works regardless of
+        iframes/shadow DOM, but prefer a real locator with `click` when one exists.
+
+    Waits up to the default timeout for the text to appear; raises if it does not.
+
+    Args:
+        text: The text to find and click.
+        match: 'contains' (default, case-insensitive substring) or 'exact'.
+        occurrence: 1-based index when multiple matches are found (default '1').
+    """
+    global driver, test_variables
+    page = driver[_run_test_id]['page']
+    if use_vars == 'true' and _run_test_id in test_variables:
+        text = test_variables[_run_test_id].get(text, text)
+
+    matches = await _ocr_wait_for_match(page, text, match, _run_test_id)
+
+    try:
+        idx = int(occurrence) - 1
+    except (TypeError, ValueError):
+        idx = 0
+    if idx < 0 or idx >= len(matches):
+        idx = 0
+    m = matches[idx]
+
+    await page.mouse.click(m["x"], m["y"])
+    return "clicked successfully on the text via OCR"
+
+
+async def exists_text_ocr(text: str, _run_test_id='1', match: str = 'contains', use_vars: str = 'false') -> str:
+    """
+    Asserts that visible TEXT is present on screen using OCR (EasyOCR).
+
+    Like exists_with_text, but reads pixels instead of the DOM — use it to verify
+    text rendered inside a <canvas>, image, or other non-DOM surface. Waits up to
+    the default timeout for the text to appear; raises if it does not.
+
+    Args:
+        text: The text to look for.
+        match: 'contains' (default, case-insensitive substring) or 'exact'.
+    """
+    global driver, test_variables
+    page = driver[_run_test_id]['page']
+    if use_vars == 'true' and _run_test_id in test_variables:
+        text = test_variables[_run_test_id].get(text, text)
+
+    await _ocr_wait_for_match(page, text, match, _run_test_id)
+    return "exists (ocr text)"
+
+
+async def get_all_text_elements(_run_test_id='1') -> str:
+    """
+    Returns ALL visible text on the current page detected via OCR (EasyOCR).
+
+    Use this BEFORE get_page_html to understand what text is actually rendered on
+    screen — it reads pixels, so it sees text inside <canvas>, images, and other
+    non-DOM surfaces that HTML parsing would miss. Each entry includes the text,
+    its OCR confidence, and the center coordinates (page pixels) of its bounding
+    box, so a returned string can be fed directly to click_text_ocr / exists_text_ocr.
+
+    Only text currently visible in the viewport is detected; scroll the page to
+    reveal more if needed.
+
+    Returns a JSON object: {"count": N, "elements": [{"text", "confidence", "x", "y"}, ...]}.
+    """
+    global driver
+    page = driver[_run_test_id]['page']
+    detections = await _ocr_detect(page)
+
+    # Coordinates from _ocr_detect are already mapped to CSS / page pixels
+    # (Retina / HiDPI safe); round them for a compact, click-ready result.
+    elements = [
+        {
+            "text": d["text"],
+            "confidence": round(d["confidence"], 2),
+            "x": round(d["x"]),
+            "y": round(d["y"]),
+        }
+        for d in detections
+    ]
+    return json.dumps({"count": len(elements), "elements": elements})
+
 
 async def select_native_dropdown(locator: str, option: str, by: str = "label", _run_test_id='1') -> str:
     """
@@ -271,7 +663,7 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
 
     if by == "value":
         await page.select_option(locator, value=option)
@@ -284,18 +676,45 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
 
 async def get_page_html(_run_test_id='1') -> str:
     """
-    Returns cleaned page HTML. Recommended to use before doing any actions on the page to confirm the existance of elements.
+    Returns condensed, frame-aware page HTML: the DOM is pruned to only
+    locator-relevant attributes (id, name, class, type, role, aria-*, placeholder,
+    href, text, …) with styles, scripts, SVG and framework noise (e.g. SAP
+    data-sap-ui-*) removed, and the result is capped at GET_PAGE_HTML_MAX_CHARS.
+
+    Frame-aware: it returns the DOM of the frame you switched into with
+    change_frame_* first, then appends the content of any child iframes — so for
+    SPAs like SAP Fiori (where the launchpad shell stays as the top document and
+    the real app renders inside a frame) the HTML matches what is on screen.
+
+    Always call get_all_text_elements first to read on-screen text via OCR; only
+    fall back to this when you also need the HTML structure/attributes to build a
+    locator.
     """
     global driver
     page = driver[_run_test_id]['page']
-    try:
-        await page.wait_for_load_state('domcontentloaded', timeout=20000)
-        content = await page.content()
-    except Exception:
-        await page.wait_for_load_state('load', timeout=30000)
-        content = await page.content()
-    html_content = clean_html(content)
-    return html_content
+    active_frame = driver[_run_test_id].get('frame')
+
+    # page.content() can fail with "Unable to retrieve content because the page is
+    # navigating and changing the content" if it's called mid-navigation. Retry a
+    # few times, letting the page settle between attempts, before giving up.
+    attempts = 4
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await page.wait_for_load_state('domcontentloaded', timeout=20000)
+            return await _collect_frame_html(page, active_frame)
+        except Exception as e:
+            last_exc = e
+            logging.warning(f"[get_page_html] attempt {attempt}/{attempts} failed: {e}")
+            # Let the in-flight navigation finish, then retry.
+            try:
+                await page.wait_for_load_state('load', timeout=30000)
+            except Exception:
+                pass
+            if attempt < attempts:
+                await asyncio.sleep(0.5)
+
+    raise last_exc
 
 async def return_current_url(_run_test_id='1') -> str:
     """
@@ -313,12 +732,19 @@ async def change_windows_tabs(_run_test_id='1') -> str:
     global driver
     context = driver[_run_test_id]['context']
     pages = context.pages
+    # Check for timeout or new page every 500ms, up to 10s total wait (since we don't know exactly when the new page will open)
+    deadline = time.time() + test_timeout[_run_test_id]
+    while time.time() < deadline:
+        pages = context.pages
+        if len(pages) > 1:
+            break
+        await asyncio.sleep(0.5)
     if len(pages) > 1:
         page = pages[-1]
         driver[_run_test_id]['page'] = page
-        content = await page.content()
-        html_content = clean_html(content)
-        return html_content
+        # The new tab has its own frames; drop any frame we were focused on.
+        driver[_run_test_id].pop('frame', None)
+        return await _collect_frame_html(page, None)
     return "no new tab"
 
 async def change_frame_by_id(frame_name, _run_test_id='1') -> str:
@@ -338,14 +764,40 @@ async def change_frame_by_locator(locator: str, _run_test_id='1') -> str:
     Switches focus to the specified iframe by locator.
     """
     global driver
-    page = driver[_run_test_id]['page']
-    element_handle = await page.query_selector(locator)
-    if element_handle:
-        frame = await element_handle.content_frame()
-        if frame:
-            driver[_run_test_id]['frame'] = frame
-            return "frame_changed"
-    return "frame not found"
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    timeout_s = test_timeout[_run_test_id]
+    deadline = time.time() + timeout_s
+    logging.info(f"[change_frame_by_locator] locator={locator!r}, timeout={timeout_s}s, page_type={type(page).__name__}, is_frame={'frame' in driver[_run_test_id]}")
+    attempt = 0
+    while True:
+        attempt += 1
+        element_handle = await page.query_selector(locator)
+        logging.info(f"[change_frame_by_locator] attempt={attempt}, element_handle={element_handle is not None}")
+        if element_handle:
+            tag = await element_handle.get_attribute("tagName") or await element_handle.evaluate("el => el.tagName")
+            src = await element_handle.get_attribute("src")
+            logging.info(f"[change_frame_by_locator] element tag={tag}, src={src!r}")
+            try:
+                frame = await asyncio.wait_for(
+                    element_handle.content_frame(),
+                    timeout=max(0.5, deadline - time.time()),
+                )
+            except asyncio.TimeoutError:
+                logging.warning(f"[change_frame_by_locator] content_frame() timed out after attempt={attempt}")
+                return "frame not found (content_frame timed out)"
+            logging.info(f"[change_frame_by_locator] content_frame result: {frame}, frame_name={getattr(frame, 'name', None)}, frame_url={getattr(frame, 'url', None)}")
+            if frame:
+                driver[_run_test_id]['frame'] = frame
+                logging.info(f"[change_frame_by_locator] SUCCESS - switched to frame url={frame.url}")
+                return "frame_changed"
+            else:
+                logging.warning(f"[change_frame_by_locator] content_frame() returned None (iframe not loaded yet?)")
+        remaining = deadline - time.time()
+        logging.info(f"[change_frame_by_locator] remaining={remaining:.1f}s")
+        if remaining <= 0:
+            logging.warning(f"[change_frame_by_locator] TIMEOUT after {attempt} attempts")
+            return "frame not found"
+        await asyncio.sleep(0.3)
 
 async def change_frame_to_original(_run_test_id='1') -> str:
     """
@@ -494,3 +946,10 @@ async def upload_file_to_form(locator: str, file_name: str, wait_for: str = '', 
         wait_detail = f", warning: wait timed out ({e}) - upload may still be in progress"
 
     return f"uploaded {safe_name} ({abs_path}) to {locator}{wait_detail}"
+
+
+# ─── Eagerly warm up the OCR reader at agent startup ────────────────────────
+# Loads the (heavy) EasyOCR model in the background so the first click_text_ocr /
+# exists_text_ocr call is fast. Set OCR_WARMUP=false to skip (e.g. for tests).
+if os.getenv("OCR_WARMUP", "true").lower() in ("1", "true", "yes"):
+    _warmup_ocr_reader()
