@@ -190,41 +190,59 @@ GET_PAGE_HTML_PER_FRAME_MAX_CHARS = int(
 # Safety cap on how many frames get_page_html will read (Fiori can spawn many).
 GET_PAGE_HTML_MAX_FRAMES = int(os.getenv("GET_PAGE_HTML_MAX_FRAMES", "12"))
 
-# In-browser DOM pruner. Frameworks like SAP UI5 / Fiori emit enormous DOMs that
-# are mostly inline styles, data-sap-ui-* attributes, SVG icons and wrapper divs.
-# This clones the DOM, drops noise tags, and strips every attribute that isn't
-# useful for locating/interacting with an element — keeping the HTML structure
-# the agent needs while cutting size dramatically. Runs in the page, not on a
-# giant string in Python.
 _PRUNE_DOM_JS = r"""
 () => {
   const ALLOWED = new Set(['id','name','class','type','role','href','src','alt',
     'title','value','placeholder','for','label','checked','selected','disabled',
     'readonly','required','tabindex','aria-label','aria-labelledby',
-    'aria-describedby','aria-hidden','aria-expanded','aria-checked',
-    'aria-selected','aria-current','data-testid']);
+    'aria-describedby','aria-expanded','aria-checked','aria-selected',
+    'aria-current','data-testid']);
   // Attributes whose values are useful as locators and must not be truncated.
   const NO_TRUNC = new Set(['id','name','class','for','aria-label','aria-labelledby']);
-  const DROP = 'script,style,svg,noscript,link,meta,head,template,base,iframe';
-  const root = (document.body || document.documentElement).cloneNode(true);
-  root.querySelectorAll(DROP).forEach(n => n.remove());
+  const DROP = new Set(['SCRIPT','STYLE','SVG','NOSCRIPT','LINK','META','HEAD',
+    'TEMPLATE','BASE','IFRAME','PATH','USE']);
+  const VOID = new Set(['INPUT','IMG','BR','HR','AREA','COL','EMBED','SOURCE','TRACK','WBR']);
+  const esc = (s) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const isHidden = (el) => {
+    if (el.hidden) return true;
+    if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return true;
+    const cs = window.getComputedStyle(el);
+    if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse')) return true;
+    return false;
+  };
+
+  const attrs = (el) => {
+    let out = '';
+    for (const a of Array.from(el.attributes || [])) {
+      const n = a.name.toLowerCase();
+      if (!ALLOWED.has(n)) continue;
+      let v = a.value || '';
+      if ((n === 'src' || n === 'href') && v.startsWith('data:')) v = 'data:[omitted]';
+      else if (!NO_TRUNC.has(n) && v.length > 200) v = v.slice(0, 200) + '…';
+      out += ' ' + n + '="' + esc(v) + '"';
+    }
+    return out;
+  };
+
   const walk = (el) => {
-    if (el.attributes) {
-      for (const a of Array.from(el.attributes)) {
-        const n = a.name.toLowerCase();
-        if (!ALLOWED.has(n)) { el.removeAttribute(a.name); continue; }
-        const v = a.value || '';
-        if ((n === 'src' || n === 'href') && v.startsWith('data:')) {
-          el.setAttribute(a.name, 'data:[omitted]');
-        } else if (!NO_TRUNC.has(n) && v.length > 200) {
-          el.setAttribute(a.name, v.slice(0, 200) + '…');
-        }
+    if (DROP.has(el.tagName) || isHidden(el)) return '';
+    const tag = el.tagName.toLowerCase();
+    let html = '<' + tag + attrs(el);
+    if (VOID.has(el.tagName)) return html + '/>';
+    html += '>';
+    for (const node of Array.from(el.childNodes)) {
+      if (node.nodeType === 3) {                 // text node
+        const t = node.textContent.replace(/\s+/g, ' ');
+        if (t.trim()) html += esc(t);
+      } else if (node.nodeType === 1) {          // element node
+        html += walk(node);
       }
     }
-    for (const c of Array.from(el.children)) walk(c);
+    return html + '</' + tag + '>';
   };
-  walk(root);
-  return root.outerHTML;
+
+  return walk(document.body || document.documentElement);
 }
 """
 
@@ -250,10 +268,9 @@ async def _collect_frame_html(page, active_frame=None) -> str:
     Frame-aware HTML reader. Returns the pruned/cleaned DOM of the *primary*
     frame first (the frame the agent switched into via change_frame_*, else the
     main frame), then appends the content of every other non-empty frame on the
-    page (e.g. SAP Fiori apps that render inside an iframe). This keeps the DOM
-    aligned with what is actually painted on screen — the top document alone
-    often only shows the launchpad shell ("My Home") while the real app lives in
-    a child frame.
+    page. This keeps the DOM aligned with what is actually painted on screen — 
+    the top document alone often only shows the launchpad shell ("My Home") while 
+    the real app lives in a child frame.
     """
     primary = active_frame or page.main_frame
 
@@ -342,7 +359,6 @@ async def create_driver(_run_test_id='1'):
     global driver, test_variables, test_timeout
     test_timeout[_run_test_id] = DEFAULT_TIMEOUT
     test_variables[_run_test_id] = {}
-    await stop_all_drivers()
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=True)
     context = await browser.new_context(
@@ -398,7 +414,7 @@ async def create_driver(_run_test_id='1'):
 
     driver[_run_test_id] = {'playwright': playwright, 'browser': browser, 'context': context, 'page': page}
 
-    main_url = os.getenv("MAIN_URL", "https://beta.barkoagent.com")
+    main_url = os.getenv("MAIN_URL", "https://google.com")
     _stream_stop_after_raw = os.getenv("STREAM_STOP_AFTER_S", "600")
     try:
         _stream_stop_after = float(_stream_stop_after_raw)
@@ -652,6 +668,44 @@ async def get_all_text_elements(_run_test_id='1') -> str:
     return json.dumps({"count": len(elements), "elements": elements})
 
 
+async def type_keys(value: str, _run_test_id='1', clear: str = 'false', use_vars: str = 'false') -> str:
+    """
+    Types text into the CURRENTLY FOCUSED element via the keyboard — no locator
+    needed. Use it right after click or click_text_ocr has focused a field. This
+    is the way to fill inputs in screens whose controls
+    have no stable DOM locator: click the field visually, then type.
+
+    Args:
+        value: The text to type.
+        clear: 'true' to select-all (Control+A) and delete the existing content
+               before typing — use when replacing a field's current value.
+    """
+    global driver, test_variables
+    page = driver[_run_test_id]['page']
+    if use_vars == 'true' and _run_test_id in test_variables:
+        value = test_variables[_run_test_id].get(value, value)
+    if clear == 'true':
+        await page.keyboard.press('Control+A')
+        await page.keyboard.press('Delete')
+    await page.keyboard.type(value)
+    return "typed text into the focused element"
+
+
+async def press_key(key: str, _run_test_id='1') -> str:
+    """
+    Presses a single key or key chord, sent to the currently focused element.
+
+    Useful for confirming/triggering value resolution and dismissing dialogs. 
+    Examples: 'Enter' (e.g. resolve a Sold-to Party value),
+    'Tab' (move to the next field), 'Escape' (dismiss a dialog), 'ArrowDown',
+    'Control+A'. Key names follow Playwright's keyboard syntax.
+    """
+    global driver
+    page = driver[_run_test_id]['page']
+    await page.keyboard.press(key)
+    return f"pressed {key}"
+
+
 async def select_native_dropdown(locator: str, option: str, by: str = "label", _run_test_id='1') -> str:
     """
     Selects an option from a native <select> element.
@@ -678,17 +732,13 @@ async def get_page_html(_run_test_id='1') -> str:
     """
     Returns condensed, frame-aware page HTML: the DOM is pruned to only
     locator-relevant attributes (id, name, class, type, role, aria-*, placeholder,
-    href, text, …) with styles, scripts, SVG and framework noise (e.g. SAP
-    data-sap-ui-*) removed, and the result is capped at GET_PAGE_HTML_MAX_CHARS.
+    href, text, …) with styles, scripts, SVG and framework noise removed, 
+    and the result is capped at GET_PAGE_HTML_MAX_CHARS.
 
     Frame-aware: it returns the DOM of the frame you switched into with
-    change_frame_* first, then appends the content of any child iframes — so for
-    SPAs like SAP Fiori (where the launchpad shell stays as the top document and
-    the real app renders inside a frame) the HTML matches what is on screen.
+    change_frame_* first, then appends the content of any child iframes.
 
-    Always call get_all_text_elements first to read on-screen text via OCR; only
-    fall back to this when you also need the HTML structure/attributes to build a
-    locator.
+    You can validate with get_all_text_elements for read on-screen text via OCR.
     """
     global driver
     page = driver[_run_test_id]['page']
