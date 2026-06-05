@@ -217,6 +217,12 @@ def _apply_evidence(
         criterion.incomplete_checks.append(bucket_payload)
         if criterion.outcome_status != OUTCOME_FAILED:
             criterion.outcome_status = OUTCOME_NEEDS_REVIEW
+    elif bucket_name == "not_applicable":
+        # Custom evaluator found no applicable elements. Record the evidence but
+        # do NOT count it as a passed_check (which would tag the criterion as a
+        # soft/heuristic pass); promote only NOT_TESTED → NOT_APPLICABLE.
+        if criterion.outcome_status == OUTCOME_NOT_TESTED:
+            criterion.outcome_status = OUTCOME_NOT_APPLICABLE
     elif bucket_name == "passed_checks":
         criterion.passed_checks.append(bucket_payload)
         if criterion.outcome_status == OUTCOME_NOT_TESTED:
@@ -233,6 +239,7 @@ def _apply_custom_check_results(
     journey_step_label: str,
     journey_step_index: int,
     frame_name: Optional[str],
+    fallback_screenshot_b64: str = "",
 ) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
 
@@ -256,6 +263,10 @@ def _apply_custom_check_results(
         )
         if check.get("screenshot_b64"):
             location.screenshot_ref = "data:image/jpeg;base64,{}".format(check["screenshot_b64"])
+        elif fallback_screenshot_b64 and check["outcome"] in (OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW):
+            # Locator-less custom failure (e.g. timing marquee with empty locator) —
+            # fall back to the page checkpoint screenshot.
+            location.screenshot_ref = "data:image/jpeg;base64,{}".format(fallback_screenshot_b64)
         evidence = EvidenceItem(
             source=check["source"],
             severity=check["severity"],
@@ -270,6 +281,8 @@ def _apply_custom_check_results(
             bucket_name = "failed_nodes"
         elif check["outcome"] == OUTCOME_NEEDS_REVIEW:
             bucket_name = "incomplete_checks"
+        elif check["outcome"] == OUTCOME_NOT_APPLICABLE:
+            bucket_name = "not_applicable"
         else:
             bucket_name = "passed_checks"
 
@@ -299,6 +312,7 @@ async def _run_metadata_checks(
     journey_step_label: str,
     journey_step_index: int,
     frame_name: Optional[str],
+    fallback_screenshot_b64: str = "",
 ) -> List[Dict[str, Any]]:
     custom_results: List[Dict[str, Any]] = []
     html_lang = await page.evaluate("() => document.documentElement.getAttribute('lang') || ''")
@@ -340,6 +354,10 @@ async def _run_metadata_checks(
             element_text=check["element_text"],
             report_anchor=anchor,
         )
+        if fallback_screenshot_b64 and not check["passed"]:
+            # Metadata checks (title / lang) have no element locator to capture —
+            # attach the page checkpoint screenshot for failing ones.
+            location.screenshot_ref = "data:image/jpeg;base64,{}".format(fallback_screenshot_b64)
         evidence = EvidenceItem(
             source=check["source"],
             severity="moderate" if check["passed"] else "serious",
@@ -792,6 +810,7 @@ def _register_axe_results(
     journey_step_label: str,
     journey_step_index: int,
     frame_name: Optional[str],
+    fallback_screenshot_b64: str = "",
 ) -> None:
     if axe_payload.get("status") != "success" or not axe_payload.get("results"):
         return
@@ -833,6 +852,11 @@ def _register_axe_results(
                     )
                     if node.get("screenshot_b64"):
                         location.screenshot_ref = "data:image/jpeg;base64,{}".format(node["screenshot_b64"])
+                    elif fallback_screenshot_b64 and outcome in (OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW):
+                        # No element-level capture (e.g. axe incomplete node, or per-rule
+                        # cap reached) — fall back to the page checkpoint screenshot so no
+                        # failing/needs-review instance is left image-less.
+                        location.screenshot_ref = "data:image/jpeg;base64,{}".format(fallback_screenshot_b64)
                     # Extract per-node check data (e.g. contrast ratio, colours, reason)
                     node_check_data: Dict[str, Any] = {}
                     for _chk in (node.get("any") or []) + (node.get("all") or []):
@@ -1346,6 +1370,7 @@ async def append_accessibility_audit_checkpoint(
             journey_step_label=journey_step_label,
             journey_step_index=journey_step_index,
             frame_name=frame_name,
+            fallback_screenshot_b64=checkpoint_screenshot_b64,
         )
     except Exception as exc:
         session["execution_notes"].append(
@@ -1485,6 +1510,7 @@ async def append_accessibility_audit_checkpoint(
                 journey_step_label=journey_step_label,
                 journey_step_index=journey_step_index,
                 frame_name=frame_name,
+                fallback_screenshot_b64=checkpoint_screenshot_b64,
             )
         )
     except Exception as exc:
@@ -1511,6 +1537,7 @@ async def append_accessibility_audit_checkpoint(
         journey_step_label=journey_step_label,
         journey_step_index=journey_step_index,
         frame_name=frame_name,
+        fallback_screenshot_b64=checkpoint_screenshot_b64,
     )
 
     checkpoint = {

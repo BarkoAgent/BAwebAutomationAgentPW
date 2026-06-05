@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..models import COVERAGE_AUTOMATED, COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW, OUTCOME_PASSED
+from ..models import (
+    COVERAGE_AUTOMATED,
+    COVERAGE_SEMI_AUTOMATED,
+    OUTCOME_FAILED,
+    OUTCOME_NEEDS_REVIEW,
+    OUTCOME_NOT_APPLICABLE,
+    OUTCOME_PASSED,
+)
 
 
 # WCAG 1.2.x: Time-based Media
@@ -211,7 +218,7 @@ async def run_media_alternatives_evaluator(page: Any) -> List[Dict[str, Any]]:
                 "metadata": {**metadata, "missing_captions": videos_missing_captions},
             }
         )
-    elif videos:
+    elif eligible_videos:
         results.append(
             {
                 "criterion_id": "1.2.2",
@@ -220,6 +227,22 @@ async def run_media_alternatives_evaluator(page: Any) -> List[Dict[str, Any]]:
                 "outcome": OUTCOME_PASSED,
                 "severity": "moderate",
                 "message": "All detected video elements have a captions or subtitles track.",
+                "locator": eligible_videos[0].get("locator", ""),
+                "element_text": "",
+                "metadata": metadata,
+            }
+        )
+    elif videos:
+        # Videos exist but all are decorative (muted/looping, no audio track) —
+        # captions don't apply. Report as Not Applicable, not a pass.
+        results.append(
+            {
+                "criterion_id": "1.2.2",
+                "source": "custom:media_alternatives",
+                "coverage_status": COVERAGE_AUTOMATED,
+                "outcome": OUTCOME_NOT_APPLICABLE,
+                "severity": "minor",
+                "message": "Only decorative video (muted, no audio track) detected — captions not applicable.",
                 "locator": videos[0].get("locator", ""),
                 "element_text": "",
                 "metadata": metadata,
@@ -246,7 +269,7 @@ async def run_media_alternatives_evaluator(page: Any) -> List[Dict[str, Any]]:
                 "metadata": {**metadata, "missing_descriptions": videos_missing_desc},
             }
         )
-    elif videos:
+    elif eligible_videos:
         results.append(
             {
                 "criterion_id": "1.2.5",
@@ -258,6 +281,21 @@ async def run_media_alternatives_evaluator(page: Any) -> List[Dict[str, Any]]:
                     "Video elements have description tracks or nearby transcript links. "
                     "Verify description content accurately represents all visual information."
                 ),
+                "locator": eligible_videos[0].get("locator", ""),
+                "element_text": "",
+                "metadata": metadata,
+            }
+        )
+    elif videos:
+        # Only decorative video present — audio description does not apply.
+        results.append(
+            {
+                "criterion_id": "1.2.5",
+                "source": "custom:media_alternatives",
+                "coverage_status": COVERAGE_AUTOMATED,
+                "outcome": OUTCOME_NOT_APPLICABLE,
+                "severity": "minor",
+                "message": "Only decorative video (muted, no audio track) detected — audio description not applicable.",
                 "locator": videos[0].get("locator", ""),
                 "element_text": "",
                 "metadata": metadata,
