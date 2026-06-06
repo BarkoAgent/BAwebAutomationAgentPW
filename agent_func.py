@@ -7,18 +7,37 @@ import logging
 
 import ba_ws_sdk.streaming as streaming
 import ba_ws_sdk.file_system as file_system
-from dotenv import load_dotenv
+from dotenv import load_dotenv as _load_dotenv
 from playwright.async_api import async_playwright
-load_dotenv()
+_load_dotenv()
 
-DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "10"))  # seconds; Playwright expects ms
+DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "3"))  # seconds; Playwright expects ms
 
+test_timeout: dict[str, int] = {}
 test_variables = {}
 driver: dict[str, object] = {}
 run_test_id = ""
 
 
-def clean_html(html_content):
+def set_default_timeout(timeout: str, _run_test_id='1'):
+    """
+    Sets the default timeout in seconds for Playwright actions (default is 3 seconds). This can be called from the agent's test plan to adjust timeouts dynamically.
+
+    Args:
+        timeout: Timeout in seconds (can be passed as a string from the test plan)
+    """
+    global DEFAULT_TIMEOUT
+    try:
+        if int(timeout) > 30:
+            logging.warning(f"Specified timeout {timeout}s is quite high and may lead to long waits. Will default to 30s if value is invalid.")
+            test_timeout[_run_test_id] = int(30)
+        else:
+            test_timeout[_run_test_id] = int(timeout)
+        logging.info(f"Default timeout set to {test_timeout[_run_test_id]} seconds.")
+    except ValueError:
+        logging.error(f"Invalid timeout value: '{timeout}'. Must be an integer representing seconds.")
+
+def _clean_html(html_content):
     for tag in ['script', 'style', 'svg']:
         html_content = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html_content, flags=re.DOTALL)
     return html_content
@@ -45,13 +64,15 @@ async def create_driver(_run_test_id='1'):
     """
     Creates a Playwright browser context and initializes test_variables for this run id.
     """
-    global driver, test_variables
+    global driver, test_variables, test_timeout
+    test_timeout[_run_test_id] = DEFAULT_TIMEOUT
     test_variables[_run_test_id] = {}
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=True)
     context = await browser.new_context(
         viewport={'width': 800, 'height': 800},
         accept_downloads=True,
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.4472.124 Safari/537.36",
     )
     page = await context.new_page()
 
@@ -176,9 +197,9 @@ async def send_keys(locator: str, value: str, _run_test_id='1', use_vars: str = 
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
     if use_vars == 'true' and _run_test_id in test_variables:
         value = test_variables[_run_test_id].get(value, value)
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     await page.fill(locator, value)
-    return "sent keys"
+    return value
 
 async def exists(locator: str, _run_test_id='1') -> str:
     """
@@ -186,7 +207,7 @@ async def exists(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     return "exists"
 
 async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false') -> str:
@@ -198,7 +219,7 @@ async def exists_with_text(text: str, _run_test_id='1', use_vars: str = 'false')
     if use_vars == 'true' and _run_test_id in test_variables:
         text = test_variables[_run_test_id].get(text, text)
     locator = f"text={text}"
-    await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, timeout=test_timeout[_run_test_id] * 1000)
     return "exists (text)"
 
 async def does_not_exist(locator: str, _run_test_id='1') -> str:
@@ -207,7 +228,7 @@ async def does_not_exist(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state='detached', timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state='detached', timeout=test_timeout[_run_test_id] * 1000)
     return "doesn't exists"
 
 async def scroll_to_element(locator: str, _run_test_id='1') -> str:
@@ -216,7 +237,7 @@ async def scroll_to_element(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, timeout=test_timeout[_run_test_id] * 1000)
     await page.eval_on_selector(locator, "el => el.scrollIntoView({block: 'center', inline: 'nearest'})")
     return "scrolled"
 
@@ -236,7 +257,7 @@ async def click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     await page.click(locator)
     return "clicked successfully on the element"
 
@@ -246,7 +267,7 @@ async def double_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     await page.dblclick(locator)
     return "double clicked"
 
@@ -256,7 +277,7 @@ async def right_click(locator: str, _run_test_id='1') -> str:
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
     await page.click(locator, button='right')
     return "right clicked"
 
@@ -271,7 +292,7 @@ async def select_native_dropdown(locator: str, option: str, by: str = "label", _
     """
     global driver
     page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
-    await page.wait_for_selector(locator, state="visible", timeout=DEFAULT_TIMEOUT * 1000)
+    await page.wait_for_selector(locator, state="visible", timeout=test_timeout[_run_test_id] * 1000)
 
     if by == "value":
         await page.select_option(locator, value=option)
@@ -294,7 +315,7 @@ async def get_page_html(_run_test_id='1') -> str:
     except Exception:
         await page.wait_for_load_state('load', timeout=30000)
         content = await page.content()
-    html_content = clean_html(content)
+    html_content = _clean_html(content)
     return html_content
 
 async def return_current_url(_run_test_id='1') -> str:
@@ -313,11 +334,18 @@ async def change_windows_tabs(_run_test_id='1') -> str:
     global driver
     context = driver[_run_test_id]['context']
     pages = context.pages
+    # Check for timeout or new page every 500ms, up to 10s total wait (since we don't know exactly when the new page will open)
+    deadline = time.time() + test_timeout[_run_test_id]
+    while time.time() < deadline:
+        pages = context.pages
+        if len(pages) > 1:
+            break
+        await asyncio.sleep(0.5)
     if len(pages) > 1:
         page = pages[-1]
         driver[_run_test_id]['page'] = page
         content = await page.content()
-        html_content = clean_html(content)
+        html_content = _clean_html(content)
         return html_content
     return "no new tab"
 
@@ -338,14 +366,40 @@ async def change_frame_by_locator(locator: str, _run_test_id='1') -> str:
     Switches focus to the specified iframe by locator.
     """
     global driver
-    page = driver[_run_test_id]['page']
-    element_handle = await page.query_selector(locator)
-    if element_handle:
-        frame = await element_handle.content_frame()
-        if frame:
-            driver[_run_test_id]['frame'] = frame
-            return "frame_changed"
-    return "frame not found"
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    timeout_s = test_timeout[_run_test_id]
+    deadline = time.time() + timeout_s
+    logging.info(f"[change_frame_by_locator] locator={locator!r}, timeout={timeout_s}s, page_type={type(page).__name__}, is_frame={'frame' in driver[_run_test_id]}")
+    attempt = 0
+    while True:
+        attempt += 1
+        element_handle = await page.query_selector(locator)
+        logging.info(f"[change_frame_by_locator] attempt={attempt}, element_handle={element_handle is not None}")
+        if element_handle:
+            tag = await element_handle.get_attribute("tagName") or await element_handle.evaluate("el => el.tagName")
+            src = await element_handle.get_attribute("src")
+            logging.info(f"[change_frame_by_locator] element tag={tag}, src={src!r}")
+            try:
+                frame = await asyncio.wait_for(
+                    element_handle.content_frame(),
+                    timeout=max(0.5, deadline - time.time()),
+                )
+            except asyncio.TimeoutError:
+                logging.warning(f"[change_frame_by_locator] content_frame() timed out after attempt={attempt}")
+                return "frame not found (content_frame timed out)"
+            logging.info(f"[change_frame_by_locator] content_frame result: {frame}, frame_name={getattr(frame, 'name', None)}, frame_url={getattr(frame, 'url', None)}")
+            if frame:
+                driver[_run_test_id]['frame'] = frame
+                logging.info(f"[change_frame_by_locator] SUCCESS - switched to frame url={frame.url}")
+                return "frame_changed"
+            else:
+                logging.warning(f"[change_frame_by_locator] content_frame() returned None (iframe not loaded yet?)")
+        remaining = deadline - time.time()
+        logging.info(f"[change_frame_by_locator] remaining={remaining:.1f}s")
+        if remaining <= 0:
+            logging.warning(f"[change_frame_by_locator] TIMEOUT after {attempt} attempts")
+            return "frame not found"
+        await asyncio.sleep(0.3)
 
 async def change_frame_to_original(_run_test_id='1') -> str:
     """
