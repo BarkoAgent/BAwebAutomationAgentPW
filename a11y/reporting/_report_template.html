@@ -780,7 +780,7 @@ section.block > .lede{margin:0 0 16px;color:var(--muted);font-size:13px;max-widt
     <div class="nav-section">
       <div class="nav-title">Findings</div>
       <nav class="nav" id="nav-findings">
-        <a href="#filter-fail"><span class="toc-item"><span class="toc-dot fail"></span> Failed</span><span class="count" data-c="FAILED">0</span></a>
+        <a href="#filter-fail"><span class="toc-item"><span class="toc-dot fail"></span> Failed criteria</span><span class="count" data-c="FAILED">0</span></a>
         <a href="#filter-review"><span class="toc-item"><span class="toc-dot review"></span> Needs review</span><span class="count" data-c="NEEDS_REVIEW">0</span></a>
         <a href="#filter-pass"><span class="toc-item"><span class="toc-dot pass"></span> Passed</span><span class="count" data-c="PASSED">0</span></a>
         <a href="#filter-na"><span class="toc-item"><span class="toc-dot na"></span> N/A</span><span class="count" data-c="NOT_APPLICABLE">0</span></a>
@@ -1140,6 +1140,9 @@ function renderKPIs(){
   const issues = (oc.FAILED||0)+(oc.NEEDS_REVIEW||0)+(oc.ERROR||0);
   const automated = (DATA.summary?.coverage_counts?.AUTOMATED||0) + (DATA.summary?.coverage_counts?.SEMI_AUTOMATED||0);
   const evCount = (DATA.criteria||[]).reduce((s,c)=> s + (c.evidence||[]).filter(e => e.outcome==='FAILED'||e.outcome==='ERROR').length, 0);
+  // Failing nodes = distinct DOM nodes that failed. Only failing criteria carry
+  // failed_nodes, so an unguarded sum equals the failed-criteria total.
+  const failingNodes = (DATA.criteria||[]).reduce((s,c)=> s + (c.failed_nodes||[]).length, 0);
 
   $('#kpi-row').innerHTML = `
     <div class="kpi score">
@@ -1157,6 +1160,11 @@ function renderKPIs(){
         <span><b>${oc.NEEDS_REVIEW||0}</b> review</span>
         <span><b>${oc.ERROR||0}</b> error</span>
       </div>
+    </div>
+    <div class="kpi">
+      <div class="lbl">Failing nodes</div>
+      <div class="num" style="color:var(--fail)">${failingNodes}</div>
+      <div class="sub">distinct DOM nodes that failed</div>
     </div>
     <div class="kpi">
       <div class="lbl">Failed evidence</div>
@@ -1188,7 +1196,7 @@ function renderOutcomeBar(){
     return `<div class="${seg}" style="flex:${v}" title="${k}: ${v}">${v}</div>`;
   }).join('');
   $('#outcome-legend').innerHTML = `
-    <span><i class="fail"></i>Failed (${oc.FAILED||0})</span>
+    <span><i class="fail"></i>Failed criteria (${oc.FAILED||0})</span>
     <span><i class="review"></i>Needs review (${oc.NEEDS_REVIEW||0})</span>
     <span><i class="pass"></i>Passed (${oc.PASSED||0})</span>
     <span><i class="na"></i>Not applicable (${oc.NOT_APPLICABLE||0})</span>
@@ -1453,8 +1461,22 @@ function toggleRow(el){
   detail.querySelectorAll('.copy-btn').forEach(b => b.addEventListener('click', onCopyClick));
   detail.querySelectorAll('.ev-head').forEach(h => h.addEventListener('click', e => {
     if (e.target.closest('a,button,code,.copy-btn')) return;
-    h.closest('.ev-row').classList.toggle('open');
+    const row = h.closest('.ev-row');
+    const isOpen = row.classList.toggle('open');
+    const tgl = h.querySelector('.ev-toggle');
+    if (tgl) tgl.setAttribute('aria-expanded', String(isOpen));
   }));
+  // The chevron is a <button>, so the .ev-head guard above skips it — wire it
+  // directly so the obvious toggle affordance both expands AND collapses the row.
+  detail.querySelectorAll('.ev-toggle').forEach(tgl => {
+    tgl.setAttribute('aria-expanded', 'false');
+    tgl.addEventListener('click', e => {
+      e.stopPropagation();
+      const row = tgl.closest('.ev-row');
+      const isOpen = row.classList.toggle('open');
+      tgl.setAttribute('aria-expanded', String(isOpen));
+    });
+  });
 }
 
 function renderManifestList(manifests, key){

@@ -4,7 +4,14 @@ import asyncio
 import logging
 from typing import Any, Dict, List
 
-from ..models import COVERAGE_AUTOMATED, COVERAGE_SEMI_AUTOMATED, OUTCOME_FAILED, OUTCOME_NEEDS_REVIEW, OUTCOME_PASSED
+from ..models import (
+    COVERAGE_AUTOMATED,
+    COVERAGE_SEMI_AUTOMATED,
+    OUTCOME_FAILED,
+    OUTCOME_NEEDS_REVIEW,
+    OUTCOME_NOT_APPLICABLE,
+    OUTCOME_PASSED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -265,14 +272,15 @@ async def run_timing_evaluator(page: Any) -> List[Dict[str, Any]]:
             }
         )
     else:
+        # No moving/auto-updating content exists — Pause/Stop/Hide does not apply.
         results.append(
             {
                 "criterion_id": "2.2.2",
                 "source": "custom:timing",
                 "coverage_status": COVERAGE_AUTOMATED,
-                "outcome": OUTCOME_PASSED,
+                "outcome": OUTCOME_NOT_APPLICABLE,
                 "severity": "minor",
-                "message": "No auto-advancing carousels, marquees, or auto-updating content detected.",
+                "message": "No auto-advancing carousels, marquees, or auto-updating content detected — criterion not applicable.",
                 "locator": "",
                 "element_text": "",
                 "metadata": metadata,
@@ -299,14 +307,15 @@ async def run_timing_evaluator(page: Any) -> List[Dict[str, Any]]:
             }
         )
     else:
+        # No time limits / countdown timers exist — Timing Adjustable does not apply.
         results.append(
             {
                 "criterion_id": "2.2.1",
                 "source": "custom:timing",
                 "coverage_status": COVERAGE_AUTOMATED,
-                "outcome": OUTCOME_PASSED,
+                "outcome": OUTCOME_NOT_APPLICABLE,
                 "severity": "minor",
-                "message": "No countdown timer elements detected on the page.",
+                "message": "No countdown timer elements detected on the page — criterion not applicable.",
                 "locator": "",
                 "element_text": "",
                 "metadata": metadata,
