@@ -352,7 +352,7 @@ async def stop_all_drivers(**kwargs):
     driver.clear()
     logging.info("All drivers stopped and cleared.")
 
-async def create_driver(_run_test_id='1'):
+async def create_driver(_run_test_id='1', url=None):
     """
     Creates a Playwright browser context and initializes test_variables for this run id.
     """
@@ -414,7 +414,7 @@ async def create_driver(_run_test_id='1'):
 
     driver[_run_test_id] = {'playwright': playwright, 'browser': browser, 'context': context, 'page': page}
 
-    main_url = os.getenv("MAIN_URL", "https://google.com")
+    main_url = url or os.getenv("MAIN_URL", "https://google.com")
     _stream_stop_after_raw = os.getenv("STREAM_STOP_AFTER_S", "600")
     try:
         _stream_stop_after = float(_stream_stop_after_raw)
@@ -668,6 +668,105 @@ async def get_all_text_elements(_run_test_id='1') -> str:
     return json.dumps({"count": len(elements), "elements": elements})
 
 
+async def click_coordinates(x: str, y: str, _run_test_id='1') -> str:
+    """
+    Clicks at the given CSS pixel coordinates on the page.
+
+    Use this when you know the exact (x, y) position from a screenshot —
+    for example after a vision model or get_all_text_elements returns
+    element positions. Coordinates must be in CSS pixels (the same space
+    as click_text_ocr and get_all_text_elements), not physical/device pixels.
+
+    Works regardless of iframes or shadow DOM — the click is positional.
+    Prefer click(locator) when a stable DOM selector is available; use this
+    for canvas elements, non-DOM widgets, or when acting on screenshot
+    coordinates directly.
+
+    Args:
+        x: Horizontal CSS pixel position (numeric, e.g. '320').
+        y: Vertical CSS pixel position (numeric, e.g. '240').
+    """
+    global driver
+    page = driver[_run_test_id]['page']
+    css_x = float(x)
+    css_y = float(y)
+    await page.mouse.move(css_x, css_y)
+    await page.mouse.click(css_x, css_y)
+    return f"clicked at ({css_x}, {css_y})"
+
+
+async def scroll_by(dx: str, dy: str, _run_test_id='1') -> str:
+    """
+    Scrolls the page by the given number of CSS pixels using the mouse wheel.
+
+    Positive dy scrolls DOWN; negative dy scrolls UP.
+    Positive dx scrolls RIGHT; negative dx scrolls LEFT.
+
+    Use scroll_to_element(locator) to scroll a specific element into view.
+    Use this function when you need to scroll by a known pixel amount, e.g.
+    to reveal content below the fold when acting from a screenshot.
+
+    Args:
+        dx: Horizontal scroll in CSS pixels (positive = right, negative = left).
+        dy: Vertical scroll in CSS pixels (positive = down, negative = up).
+    """
+    global driver
+    page = driver[_run_test_id]['page']
+    await page.mouse.wheel(float(dx), float(dy))
+    return f"scrolled by ({dx}, {dy})"
+
+
+async def move_mouse(x: str, y: str, _run_test_id='1') -> str:
+    """
+    Moves the mouse pointer to the given CSS pixel coordinates WITHOUT clicking.
+
+    Use this to:
+    - Hover over an element to trigger a tooltip, dropdown, or hover state.
+    - Position the mouse before calling scroll_by.
+    - Drag preparation (move to source, then use mouse actions).
+
+    Coordinates are in CSS pixels, matching the screenshot coordinate space.
+
+    Args:
+        x: Horizontal CSS pixel position.
+        y: Vertical CSS pixel position.
+    """
+    global driver
+    page = driver[_run_test_id]['page']
+    await page.mouse.move(float(x), float(y))
+    return f"mouse moved to ({x}, {y})"
+
+
+async def run_javascript(script: str, _run_test_id='1') -> str:
+    """
+    Executes arbitrary JavaScript in the page and returns the result as a string.
+
+    Use this for:
+    - Reading values not accessible via DOM locators or OCR.
+    - Triggering actions that cannot be performed via normal clicks/inputs.
+    - Checking internal state (e.g. localStorage, sessionStorage, cookies).
+    - Scrolling programmatically (e.g. window.scrollBy(0, 500)).
+
+    The script runs in the context of the CURRENT frame (use change_frame_* first
+    if you need to run JS inside an iframe). The result is JSON-serialised, so
+    objects and arrays are returned as their JSON representation.
+
+    CAUTION: Do not use this to bypass authentication or perform destructive
+    operations unless the test explicitly requires it.
+
+    Args:
+        script: JavaScript expression or statement(s) to evaluate.
+                Single expression: 'document.title'
+                Multi-line: 'const a = 1; const b = 2; return a + b;'
+                Wrap multi-line in an IIFE if needed:
+                '(function(){ ... return result; })()'
+    """
+    global driver
+    page = driver[_run_test_id].get('frame') or driver[_run_test_id]['page']
+    result = await page.evaluate(script)
+    return str(result)
+
+
 async def type_keys(value: str, _run_test_id='1', clear: str = 'false', use_vars: str = 'false') -> str:
     """
     Types text into the CURRENTLY FOCUSED element via the keyboard — no locator
@@ -685,7 +784,7 @@ async def type_keys(value: str, _run_test_id='1', clear: str = 'false', use_vars
     if use_vars == 'true' and _run_test_id in test_variables:
         value = test_variables[_run_test_id].get(value, value)
     if clear == 'true':
-        await page.keyboard.press('Control+A')
+        await page.keyboard.press('ControlOrMeta+A')
         await page.keyboard.press('Delete')
     await page.keyboard.type(value)
     return "typed text into the focused element"
@@ -936,6 +1035,19 @@ async def wait_for_download(timeout: str = '30', _run_test_id='1') -> str:
         return json.dumps({"status": "success", "file_name": entry["file_name"], "size_bytes": entry["size_bytes"]})
     return json.dumps({"status": "error", "error": f"Download failed: {entry.get('error', 'unknown')}", "file_name": entry["file_name"]})
 
+async def wait_time(seconds: str, _run_test_id='1') -> str:
+    """
+    Waits for a specified number of seconds before proceeding.
+
+    Args:
+        seconds: The number of seconds to wait (can be a float, e.g. '2.5').
+    """
+    try:
+        secs = float(seconds)
+    except (TypeError, ValueError):
+        secs = 1.0
+    await asyncio.sleep(secs)
+    return f"waited for {secs} seconds"
 
 # ─── File Upload to Web Form (browser-specific) ─────────────────────────────
 
