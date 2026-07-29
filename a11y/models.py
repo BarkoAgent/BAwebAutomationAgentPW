@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -141,6 +142,33 @@ class ReportSection:
     rows: List[str]
 
 
+def _dedupe_screenshots(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace inline evidence screenshots with content-hash keys into `screenshots`.
+
+    The page-checkpoint screenshot is attached to every failing evidence row that has
+    no element capture of its own, so a single image can repeat 170+ times inline —
+    on a dense page that is ~46% of the whole report, and it pushes the criterion
+    payload towards the agent WS frame limit.
+
+    Consumers resolve `screenshot_ref` against the map and fall back to treating it
+    as a literal data URI, so reports written before this change keep rendering.
+    """
+    store: Dict[str, str] = dict(payload.get("screenshots") or {})
+    for criterion in payload.get("criteria") or []:
+        for item in criterion.get("evidence") or []:
+            location = item.get("location") if isinstance(item, dict) else None
+            if not isinstance(location, dict):
+                continue
+            ref = location.get("screenshot_ref")
+            if not isinstance(ref, str) or not ref.startswith("data:"):
+                continue
+            key = hashlib.sha1(ref.encode("utf-8")).hexdigest()[:16]
+            store.setdefault(key, ref)
+            location["screenshot_ref"] = key
+    payload["screenshots"] = store
+    return payload
+
+
 @dataclass
 class AccessibilityReport:
     report_meta: Dict[str, Any]
@@ -151,6 +179,8 @@ class AccessibilityReport:
     raw_sources: Dict[str, Any]
     artifacts: Dict[str, Any]
     evaluator_manifests: List[EvaluatorManifest] = field(default_factory=list)
+    # Content-hash -> data URI, populated by to_dict(); evidence rows carry the key.
+    screenshots: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return _dedupe_screenshots(asdict(self))

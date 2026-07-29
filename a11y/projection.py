@@ -232,6 +232,28 @@ def build_digest(full: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def screenshots_for_criterion(full: Dict[str, Any], criterion: Dict[str, Any]) -> Dict[str, str]:
+    """The subset of the report's screenshot map this criterion's evidence references.
+
+    Sending the used keys rather than inline data URIs is what keeps a criterion with
+    many rows sharing one page screenshot small — the worst case measured went from
+    11.84 MiB to well under 1 MiB. Reports predating the dedup carry inline data URIs
+    and yield an empty map, which consumers handle.
+    """
+    store = full.get("screenshots") or {}
+    if not store:
+        return {}
+    used: Dict[str, str] = {}
+    for item in criterion.get("evidence") or []:
+        location = item.get("location") if isinstance(item, dict) else None
+        if not isinstance(location, dict):
+            continue
+        ref = location.get("screenshot_ref")
+        if isinstance(ref, str) and ref and not ref.startswith("data:") and ref in store:
+            used[ref] = store[ref]
+    return used
+
+
 def slice_criterion(
     full: Dict[str, Any], criterion_id: str, include_passed: bool = False
 ) -> Optional[Dict[str, Any]]:
@@ -251,4 +273,5 @@ def slice_criterion(
     return {
         "report_id": (full.get("report_meta") or {}).get("report_id"),
         "criterion": out,
+        "screenshots": screenshots_for_criterion(full, out),
     }
