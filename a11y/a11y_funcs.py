@@ -306,6 +306,38 @@ async def get_accessibility_report(report_id: str, project_id: str = "", _run_te
     return _get_report(report_id=report_id, project_id=project_id, _run_test_id=_run_test_id)
 
 
+async def get_accessibility_digest(report_id: str, project_id: str = "", _run_test_id: str = "1") -> str:
+    """Returns the projected digest for a report — the overview payload the UI renders.
+
+    Preferred over get_accessibility_report for display: the full JSON is dominated
+    by inline base64 screenshots the digest discards, so this keeps the reply small.
+    """
+    if not _A11Y_AVAILABLE:
+        return _a11y_unavailable()
+    from a11y.runner import get_accessibility_digest_json as _get_digest
+    return _get_digest(report_id=report_id, project_id=project_id, _run_test_id=_run_test_id)
+
+
+async def get_accessibility_criterion(
+    report_id: str,
+    criterion_id: str,
+    include_passed: str = "false",
+    project_id: str = "",
+    _run_test_id: str = "1",
+) -> str:
+    """Returns a single criterion in full detail from a persisted report."""
+    if not _A11Y_AVAILABLE:
+        return _a11y_unavailable()
+    from a11y.runner import get_accessibility_criterion_json as _get_criterion
+    return _get_criterion(
+        report_id=report_id,
+        criterion_id=criterion_id,
+        include_passed=include_passed,
+        project_id=project_id,
+        _run_test_id=_run_test_id,
+    )
+
+
 async def export_accessibility_report(report_id: str, format: str = "json", project_id: str = "", _run_test_id: str = "1") -> str:
     """Returns a specific persisted accessibility report artifact by report id and format."""
     if not _A11Y_AVAILABLE:
@@ -538,6 +570,8 @@ def get_agent_functions() -> dict:
         "get_last_accessibility_report": get_last_accessibility_report,
         "list_accessibility_reports": list_accessibility_reports,
         "get_accessibility_report": get_accessibility_report,
+        "get_accessibility_digest": get_accessibility_digest,
+        "get_accessibility_criterion": get_accessibility_criterion,
         "export_accessibility_report": export_accessibility_report,
         "run_accessibility_test_case": run_accessibility_test_case,
     }

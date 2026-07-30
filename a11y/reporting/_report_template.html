@@ -1493,13 +1493,22 @@ function renderManifestList(manifests, key){
 
 function sevClass(sev){ return SEVERITY_META[(sev||'unknown').toLowerCase()] || SEVERITY_META.unknown; }
 
+// Evidence screenshots are stored once in DATA.screenshots and referenced by content
+// hash, since one page-checkpoint image can be shared by 170+ rows. Reports written
+// before that change inline the data URI on the row itself.
+function resolveShot(ref){
+  if (!ref) return '';
+  if (ref.startsWith('data:')) return ref;
+  return (DATA && DATA.screenshots && DATA.screenshots[ref]) || '';
+}
+
 function evidenceHtml(c, e, i){
   const om = OUTCOME_META[e.outcome] || OUTCOME_META.NOT_TESTED;
   const sm = sevClass(e.severity);
   const loc = e.location || {};
   const helpUrl = e.metadata?.helpUrl;
   const ruleId = (e.source||'').split(':').slice(1).join(':') || (e.source||'');
-  const shot = loc.screenshot_ref || '';
+  const shot = resolveShot(loc.screenshot_ref);
   const shotIsData = shot && shot.startsWith('data:');
   return `
   <div class="ev-row">

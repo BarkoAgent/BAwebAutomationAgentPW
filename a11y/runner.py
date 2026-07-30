@@ -63,6 +63,7 @@ from .models import (
     PASS_RATIONALE_NO_APPLICABLE,
 )
 from .reporting import build_digest_json, render_html_report, render_stakeholder_summary
+from .projection import build_digest, slice_criterion
 from .registry import SECTION_IDS, build_registry
 
 
@@ -1801,13 +1802,52 @@ def get_accessibility_report_json(report_id: str, project_id: str = "", _run_tes
     return json.dumps(payload)
 
 
-def export_accessibility_report_json(report_id: str, format: str = "json", project_id: str = "", _run_test_id: str = "1") -> str:
-    requested_format = (format or "json").strip().lower()
-    if requested_format not in {"json", "html", "excel", "pdf"}:
+def get_accessibility_digest_json(report_id: str, project_id: str = "", _run_test_id: str = "1") -> str:
+    """Projected report for the UI overview — small enough to cross the WS in one frame."""
+    try:
+        payload = _load_report_payload(report_id, project_id)
+    except FileNotFoundError as exc:
+        return json.dumps({"status": "error", "error": str(exc), "report_id": report_id})
+    except Exception as exc:
+        return json.dumps({"status": "error", "error": str(exc), "report_id": report_id})
+    return json.dumps(build_digest(payload))
+
+
+def get_accessibility_criterion_json(
+    report_id: str,
+    criterion_id: str,
+    include_passed: Any = False,
+    project_id: str = "",
+    _run_test_id: str = "1",
+) -> str:
+    """One criterion in full detail, so drill-in does not refetch the whole report."""
+    if isinstance(include_passed, str):
+        include_passed = include_passed.strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        payload = _load_report_payload(report_id, project_id)
+    except FileNotFoundError as exc:
+        return json.dumps({"status": "error", "error": str(exc), "report_id": report_id})
+    except Exception as exc:
+        return json.dumps({"status": "error", "error": str(exc), "report_id": report_id})
+
+    sliced = slice_criterion(payload, criterion_id, bool(include_passed))
+    if sliced is None:
         return json.dumps({
             "status": "error",
             "report_id": report_id,
-            "error": "Unsupported export format: {}. Supported values are json, html, excel, pdf.".format(requested_format),
+            "criterion_id": criterion_id,
+            "error": "Criterion {} not found".format(criterion_id),
+        })
+    return json.dumps(sliced)
+
+
+def export_accessibility_report_json(report_id: str, format: str = "json", project_id: str = "", _run_test_id: str = "1") -> str:
+    requested_format = (format or "json").strip().lower()
+    if requested_format not in {"json", "html", "summary", "excel", "pdf"}:
+        return json.dumps({
+            "status": "error",
+            "report_id": report_id,
+            "error": "Unsupported export format: {}. Supported values are json, html, summary, excel, pdf.".format(requested_format),
         })
 
     try:
@@ -1820,6 +1860,26 @@ def export_accessibility_report_json(report_id: str, format: str = "json", proje
     _proj_id = payload.get("report_meta", {}).get("project_id", "") or project_id
     artifacts = payload.get("artifacts", {})
     file_name = artifacts.get(requested_format)
+
+    if requested_format == "summary":
+        # The stakeholder summary is a few KB where the detail HTML is tens of MB,
+        # so it is served from disk rather than re-rendered.
+        summary_path = _report_storage_dir(_proj_id) / "{}_summary.html".format(report_id)
+        if not summary_path.is_file() and _proj_id:
+            summary_path = _report_storage_dir() / "{}_summary.html".format(report_id)
+        if not summary_path.is_file():
+            content = render_stakeholder_summary(payload, detail_artifact=artifacts.get("html") or "")
+            summary_path.write_text(content, encoding="utf-8")
+        else:
+            content = summary_path.read_text(encoding="utf-8")
+        return json.dumps({
+            "status": "success",
+            "report_id": report_id,
+            "format": requested_format,
+            "file_name": artifacts.get("stakeholder_summary") or summary_path.name,
+            "content": content,
+            "available_formats": [fmt for fmt in ["json", "html"] if artifacts.get(fmt)],
+        })
 
     if requested_format in {"excel", "pdf"}:
         return json.dumps({
